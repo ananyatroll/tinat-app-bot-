@@ -1,0 +1,19 @@
+{
+  "name": "tinat-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for Tinat study app payments and credential delivery",
+  "main": "bot.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node bot.js",
+    "redeem-api": "node redeem-server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "telegraf": "^4.16.3"
+  }
+}
