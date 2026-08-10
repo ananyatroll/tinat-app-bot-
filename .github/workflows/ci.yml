@@ -32,3 +32,18 @@ jobs:
 
       - name: Check redemption server syntax
         run: node --check redeem-server.js
+
+  validate-python:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check Flask app syntax
+        run: python -m py_compile flask_app.py wsgi.py
