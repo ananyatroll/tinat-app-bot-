@@ -7,17 +7,51 @@ const ExcelJS = require('exceljs');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
+const SUPPORT_CHAT_ID = process.env.SUPPORT_CHAT_ID || ADMIN_CHAT_ID || '';
 const PHRASES_DIR = process.env.PHRASES_DIR || path.join(__dirname, 'phrases');
 const VOUCHERS_FILE = process.env.VOUCHERS_FILE || path.join(__dirname, 'data', 'vouchers.json');
 const EXPORTS_DIR = process.env.EXPORTS_DIR || path.join(__dirname, 'exports');
 const PACKAGES = loadPackages();
-const DATA_FILE = path.join(__dirname, 'data', 'users.json');
+const DATA_FILE = process.env.USERS_FILE || path.join(__dirname, 'data', 'users.json');
 
 if (!BOT_TOKEN) {
   throw new Error('Missing BOT_TOKEN in environment');
 }
 
 const bot = new Telegraf(BOT_TOKEN);
+
+function isAdmin(userId) {
+  return String(userId) === String(ADMIN_CHAT_ID);
+}
+
+function isSupport(userId) {
+  return String(userId) === String(SUPPORT_CHAT_ID);
+}
+
+function canAssignVouchers(userId) {
+  return isAdmin(userId) || isSupport(userId);
+}
+
+function normalizePhone(value) {
+  return String(value || '').replace(/[^\d+]/g, '');
+}
+
+function isPlausiblePhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length >= 9 && digits.length <= 15;
+}
+
+function normalizeVoucherStatus(status) {
+  const map = {
+    reserved: 'ASSIGNED',
+    assigned: 'ASSIGNED',
+    delivered: 'ASSIGNED',
+    redeemed: 'REDEEMED',
+    revoked: 'REVOKED',
+    unused: 'UNUSED'
+  };
+  return map[String(status || '').toLowerCase()] || '';
+}
 
 async function ensureDataFile() {
   await fs.mkdir(path.dirname(DATA_FILE), { recursive: true });
@@ -204,6 +238,7 @@ function formatDateForSheet(value) {
 
 async function createApprovedWorkbook(store) {
   await ensureExportsDir();
+  const voucherStore = await readVoucherStore();
 
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'tinat-bot';
@@ -222,20 +257,24 @@ async function createApprovedWorkbook(store) {
 
   for (const req of approvedRequests) {
     const user = req.user || {};
+    const voucher = voucherStore.issued[String(req.requestId)] || null;
     const sheetName = workbookData[req.packageLabel] ? req.packageLabel : 'Other';
     workbookData[sheetName].push({
       requestId: req.requestId,
       packageLabel: req.packageLabel,
       price: formatMoney(req.priceCents, req.currency),
+      paymentMethod: req.paymentMethodLabel || req.paymentMethod || '',
       userName: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
       telegramUsername: user.username || '',
       telegramId: user.id,
-    transactionId: req.transactionId,
-    transactionLink: req.transactionLink,
-    paymentMethod: req.paymentMethodLabel || req.paymentMethod || '',
-      voucherPhrase: req.voucherPhrase || '',
-      status: req.status,
-      approvedAt: formatDateForSheet(req.reviewedAt || new Date().toISOString()),
+      phone: (req.phone && req.phone.number) || (voucher && voucher.assignedToPhone) || '',
+      transactionId: req.transactionId,
+      transactionLink: req.transactionLink,
+      voucherPhrase: (voucher && voucher.phrase) || req.voucherPhrase || '',
+      voucherStatus: voucher ? normalizeVoucherStatus(voucher.status) : (req.voucherPhrase ? 'ASSIGNED' : ''),
+      approvedAt: formatDateForSheet(req.reviewedAt || ''),
+      assignedAt: formatDateForSheet((voucher && voucher.assignedAt) || req.assignedAt || ''),
+      redeemedAt: formatDateForSheet((voucher && voucher.redeemedAt) || ''),
       approvedBy: String(req.reviewedBy || '')
     });
   }
@@ -254,11 +293,14 @@ async function createApprovedWorkbook(store) {
       { header: 'User Name', key: 'userName', width: 22 },
       { header: 'Telegram Username', key: 'telegramUsername', width: 20 },
       { header: 'Telegram ID', key: 'telegramId', width: 16 },
+      { header: 'Phone', key: 'phone', width: 18 },
       { header: 'Transaction ID', key: 'transactionId', width: 20 },
       { header: 'Transaction Link', key: 'transactionLink', width: 40 },
       { header: 'Voucher Phrase', key: 'voucherPhrase', width: 32 },
-      { header: 'Status', key: 'status', width: 14 },
+      { header: 'Voucher Status', key: 'voucherStatus', width: 16 },
       { header: 'Approved At', key: 'approvedAt', width: 24 },
+      { header: 'Assigned At', key: 'assignedAt', width: 24 },
+      { header: 'Redeemed At', key: 'redeemedAt', width: 24 },
       { header: 'Approved By', key: 'approvedBy', width: 16 }
     ];
 
@@ -267,7 +309,7 @@ async function createApprovedWorkbook(store) {
     }
 
     sheet.getRow(1).font = { bold: true };
-    sheet.autoFilter = `A1:M${Math.max(rows.length + 1, 1)}`;
+    sheet.autoFilter = `A1:P${Math.max(rows.length + 1, 1)}`;
   }
 
   const fileName = `approved-${new Date().toISOString().replace(/[:.]/g, '-')}.xlsx`;
@@ -366,13 +408,20 @@ async function reserveVoucherPhrase(packageKey, request) {
 
   pool.issued[String(request.requestId)] = {
     requestId: request.requestId,
-    userId: request.user.id,
+    phrase,
     packageKey: pkg.key,
     packageLabel: pkg.label,
     packagePool: pkg.phrasePool,
-    phrase,
-    status: 'reserved',
-    reservedAt: new Date().toISOString()
+    status: 'assigned',
+    assignedToUserId: String(request.user.id),
+    assignedToUsername: request.user.username || '',
+    assignedToPhone: (request.phone && request.phone.number) || '',
+    phoneVerified: !!(request.phone && request.phone.verified),
+    transactionId: request.transactionId || '',
+    assignedAt: new Date().toISOString(),
+    assignedBy: String(request.assignedBy || ''),
+    redeemedAt: null,
+    redeemedByUserId: ''
   };
 
   store.packages[pkg.phrasePool] = pool;
@@ -384,8 +433,8 @@ async function reserveVoucherPhrase(packageKey, request) {
 async function getVoucherForUser(userId) {
   const store = await readVoucherStore();
   const records = Object.values(store.issued || {})
-    .filter((record) => String(record.userId) === String(userId) && normalizePhrase(record.phrase))
-    .sort((a, b) => String(b.reservedAt || '').localeCompare(String(a.reservedAt || '')));
+    .filter((record) => String(record.assignedToUserId || record.userId) === String(userId) && normalizePhrase(record.phrase))
+    .sort((a, b) => String(b.assignedAt || b.reservedAt || '').localeCompare(String(a.assignedAt || a.reservedAt || '')));
   return records[0] || null;
 }
 
@@ -424,18 +473,18 @@ function getPackageSelectionMessage(packages) {
     'Choose your package first:',
     ...packages.map((pkg) => `${pkg.label} - ${formatMoney(pkg.priceCents, pkg.currency)}`),
     '',
-    'I will then ask for your payment method, name, transaction link, and transaction ID.'
+    'I will then ask you to share your phone number, payment method, name, transaction link, and transaction ID.'
   ].join('\n');
 }
 
 function getStartMessage(packages) {
   return [
     'Welcome to Tinat.',
-    'Pick a package below, then I will ask for your payment method, name, transaction link, and transaction ID.',
+    'Pick a package below, then I will ask you to share your phone number, payment method, name, transaction link, and transaction ID.',
     '',
     ...packages.map((pkg) => `${pkg.label} - ${formatMoney(pkg.priceCents, pkg.currency)}`),
     '',
-    'After approval, the bot will send you one secret phrase for your selected package.'
+    'After approval, our support team sends you one secret phrase for your selected package.'
   ].join('\n');
 }
 
@@ -471,6 +520,7 @@ function buildRequestMessage(request) {
     `Payment Method: ${request.paymentMethodLabel || request.paymentMethod || 'N/A'}`,
     `User: ${request.user.firstName || ''} ${request.user.lastName || ''}`.trim(),
     `Telegram: @${request.user.username || 'no_username'} (${request.user.id})`,
+    `Phone: ${(request.phone && request.phone.number) || 'n/a'}${request.phone && request.phone.verified ? ' (verified)' : ' (unverified)'}`,
     `Transaction ID: ${maskTransactionId(request.transactionId)}`,
     `Transaction Link: ${request.transactionLink}`,
     '',
@@ -485,6 +535,39 @@ function buildPendingMessage(request) {
     'I sent it to the admin for verification.',
     'You will get your voucher phrase after approval.'
   ].join('\n');
+}
+
+function buildApprovedPendingVoucherMessage(request) {
+  return [
+    'Your payment was approved.',
+    'Our support team is assigning your voucher.',
+    'You will receive your voucher phrase in this chat shortly.',
+    `Request ID: ${request.requestId}`
+  ].join('\n');
+}
+
+function buildRejectedMessage(request) {
+  return [
+    'Your payment was not approved.',
+    'The admin could not verify the payment details.',
+    'If you believe this is a mistake, submit a new request with /buy.',
+    `Request ID: ${request.requestId}`
+  ].join('\n');
+}
+
+function buildPendingAssignmentMessage(pending) {
+  const lines = ['Approved purchases waiting for voucher assignment:'];
+  if (pending.length === 0) {
+    lines.push('(none)');
+  }
+  pending.forEach((req, index) => {
+    const user = req.user || {};
+    const phone = (req.phone && req.phone.number) || 'n/a';
+    const phoneVerified = req.phone && req.phone.verified ? ' (verified)' : ' (unverified)';
+    lines.push(`${index + 1}. ${req.requestId} | ${req.packageLabel} | ${user.firstName || ''} ${user.lastName || ''}`.trim() +
+      ` | @${user.username || 'no_username'} | ${phone}${phoneVerified}`);
+  });
+  return lines.join('\n');
 }
 
 function buildApprovedMessage(record) {
@@ -538,47 +621,101 @@ async function finalizeRequest(requestId, approvedBy, approved) {
   request.reviewedAt = new Date().toISOString();
   request.reviewedBy = approvedBy;
   setRequest(store, requestId, request);
+  clearDraft(store, request.user.id);
+  await writeStore(store);
 
   if (!approved) {
-    clearDraft(store, request.user.id);
-    await writeStore(store);
+    await bot.telegram.sendMessage(request.user.id, buildRejectedMessage(request));
     return request;
+  }
+
+  await bot.telegram.sendMessage(request.user.id, buildApprovedPendingVoucherMessage(request));
+  await notifySupport(store);
+  return request;
+}
+
+async function getPendingAssignments(store) {
+  const voucherStore = await readVoucherStore();
+  return Object.values(store.requests || {})
+    .filter((req) => req.status === 'approved'
+      && !req.voucherPhrase
+      && !voucherStore.issued[String(req.requestId)])
+    .sort((a, b) => String(a.reviewedAt || '').localeCompare(String(b.reviewedAt || '')));
+}
+
+async function sendPendingAssignmentList(chatId, store) {
+  const pending = await getPendingAssignments(store);
+  const keyboard = pending.map((req) => ([{
+    text: `Assign voucher → ${req.packageLabel}`,
+    callback_data: `assign:${req.requestId}`
+  }]));
+  await bot.telegram.sendMessage(chatId, buildPendingAssignmentMessage(pending), {
+    reply_markup: { inline_keyboard: keyboard }
+  });
+}
+
+async function notifySupport(store) {
+  const supportChat = SUPPORT_CHAT_ID || ADMIN_CHAT_ID;
+  if (!supportChat) {
+    return;
+  }
+  const pending = await getPendingAssignments(store);
+  if (pending.length === 0) {
+    return;
+  }
+  await sendPendingAssignmentList(supportChat, store);
+}
+
+async function assignVoucher(requestId, assignedBy) {
+  const store = await readStore();
+  const request = getRequest(store, requestId);
+
+  if (!request) {
+    return { ok: false, error: 'NOT_FOUND' };
+  }
+
+  if (request.status !== 'approved') {
+    return { ok: false, error: 'NOT_APPROVED' };
+  }
+
+  if (request.voucherPhrase) {
+    return { ok: false, error: 'ALREADY_ASSIGNED' };
   }
 
   const voucher = await runExclusiveVoucherMutation(() => reserveVoucherPhrase(request.packageKey, request));
 
-  request.deliveredAt = new Date().toISOString();
   request.voucherPhrase = voucher.phrase;
-  request.voucherStatus = 'delivered';
-  request.excelExportAt = new Date().toISOString();
-  clearDraft(store, request.user.id);
-  clearRequest(store, requestId);
+  request.voucherStatus = 'assigned';
+  request.assignedAt = voucher.assignedAt;
+  request.assignedBy = assignedBy;
   setRequest(store, requestId, request);
   await writeStore(store);
-
-  const workbookPath = await createApprovedWorkbook(store);
 
   await bot.telegram.sendMessage(request.user.id, buildApprovedMessage({
     packageLabel: request.packageLabel,
     voucherPhrase: voucher.phrase
   }));
 
+  const workbookPath = await createApprovedWorkbook(store);
   if (ADMIN_CHAT_ID) {
     const count = countApprovedRequests(store);
     await bot.telegram.sendDocument(ADMIN_CHAT_ID, { source: workbookPath, filename: path.basename(workbookPath) }, {
-      caption: `Excel updated: ${count} approved transaction(s) (incl. request ${request.requestId}). Use /export to re-download anytime.`
+      caption: `Excel updated: ${count} approved transaction(s). Request ${request.requestId} received its voucher. Use /export to re-download anytime.`
     });
   }
 
-  return request;
+  return { ok: true, voucher };
 }
 
 async function submitRequest(ctx, draft) {
   const store = await readStore();
-  const existingAccess = store.users[String(ctx.from.id)];
 
-  if (existingAccess) {
-    await ctx.reply('You already have approved access. Use /myaccess to get your login details again.');
+  const active = Object.values(store.requests || {}).find((req) =>
+    String(req.user && req.user.id) === String(ctx.from.id)
+    && (req.status === 'pending' || req.status === 'approved'));
+
+  if (active) {
+    await ctx.reply('You already have an active purchase. Use /myaccess to see its status.');
     clearDraft(store, ctx.from.id);
     await writeStore(store);
     return;
@@ -599,6 +736,7 @@ async function submitRequest(ctx, draft) {
       firstName: draft.name,
       lastName: ctx.from.last_name || null
     },
+    phone: draft.phone ? { number: draft.phone, verified: !!draft.phoneVerified } : null,
     transactionLink: draft.transactionLink,
     transactionId: draft.transactionId,
     paymentMethod: draft.paymentMethod || null,
@@ -606,6 +744,15 @@ async function submitRequest(ctx, draft) {
   };
 
   setRequest(store, requestId, request);
+  store.users[String(ctx.from.id)] = {
+    id: ctx.from.id,
+    username: ctx.from.username || null,
+    firstName: draft.name,
+    lastName: ctx.from.last_name || null,
+    phone: draft.phone || '',
+    phoneVerified: !!draft.phoneVerified,
+    updatedAt: new Date().toISOString()
+  };
   clearDraft(store, ctx.from.id);
   await writeStore(store);
 
@@ -623,6 +770,23 @@ async function handleDraftStep(ctx, text) {
 
   if (draft.step === 'package' || draft.step === 'paymentMethod') {
     return false;
+  }
+
+  if (draft.step === 'phone') {
+    const phone = normalizePhone(text);
+    if (!isPlausiblePhone(phone)) {
+      await ctx.reply('That does not look like a valid phone number. Use the Share Phone Number button, or type an international number like +251912345678.');
+      return true;
+    }
+    draft.phone = phone;
+    draft.phoneVerified = false;
+    draft.step = 'paymentMethod';
+    setDraft(store, ctx.from.id, draft);
+    await writeStore(store);
+    await ctx.reply(`Phone noted as ${phone} but NOT verified. Prefer the Share Phone Number button so we can verify it.\n\nNow choose your payment method:`, {
+      reply_markup: buildPaymentMethodKeyboard()
+    });
+    return true;
   }
 
   if (draft.step === 'name') {
@@ -678,9 +842,10 @@ bot.start(async (ctx) => {
 bot.command('help', async (ctx) => {
   await ctx.reply([
     'Available commands:',
-    '/buy - start the package and verification flow',
+    '/buy - start the package, phone and verification flow',
     '/myaccess - resend your approved voucher phrase',
-    '/export - (admin) download the full Excel of approved transactions'
+    '/export - (admin) download the full Excel of approved transactions',
+    '/pending - (support/admin) list purchases waiting for voucher assignment'
   ].join('\n'));
 });
 
@@ -777,7 +942,7 @@ bot.action(/^package:(.+)$/, async (ctx) => {
 
   const store = await readStore();
   setDraft(store, ctx.from.id, {
-    step: 'paymentMethod',
+    step: 'phone',
     packageKey: pkg.key,
     packageLabel: pkg.label,
     priceCents: pkg.priceCents,
@@ -791,10 +956,76 @@ bot.action(/^package:(.+)$/, async (ctx) => {
     `Package selected: ${pkg.label}`,
     `Price: ${formatMoney(pkg.priceCents, pkg.currency)}`,
     '',
-    'Now choose your payment method:'
+    'Share your phone number using the button below so we can verify your purchase.'
   ].join('\n'), {
+    reply_markup: {
+      keyboard: [[{ text: 'Share Phone Number', request_contact: true }]],
+      resize_keyboard: true,
+      one_time_keyboard: true
+    }
+  });
+});
+
+bot.on('contact', async (ctx) => {
+  const contact = ctx.message && ctx.message.contact;
+  if (!contact) {
+    return;
+  }
+
+  const store = await readStore();
+  const draft = getDraft(store, ctx.from.id);
+
+  if (!draft || draft.step !== 'phone') {
+    await ctx.reply('No active submission. Use /buy to start.');
+    return;
+  }
+
+  draft.phone = normalizePhone(contact.phone_number);
+  draft.phoneVerified = true;
+  draft.phoneSharedAt = new Date().toISOString();
+  draft.step = 'paymentMethod';
+  setDraft(store, ctx.from.id, draft);
+  await writeStore(store);
+
+  await ctx.reply('Phone number received and verified.', {
+    reply_markup: { remove_keyboard: true }
+  });
+  await ctx.reply('Now choose your payment method:', {
     reply_markup: buildPaymentMethodKeyboard()
   });
+});
+
+bot.action(/^assign:(.+)$/, async (ctx) => {
+  if (!canAssignVouchers(ctx.from.id)) {
+    await ctx.answerCbQuery('You are not allowed to assign vouchers.');
+    return;
+  }
+
+  const requestId = ctx.match[1];
+
+  try {
+    const result = await assignVoucher(requestId, ctx.from.id);
+    if (!result.ok) {
+      await ctx.answerCbQuery(`Assignment failed: ${result.error}`);
+      return;
+    }
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    await ctx.answerCbQuery('Voucher assigned and sent to the user.');
+    const store = await readStore();
+    await notifySupport(store);
+  } catch (error) {
+    console.error('Failed to assign voucher:', error);
+    await ctx.answerCbQuery('Failed to assign voucher.');
+  }
+});
+
+bot.command('pending', async (ctx) => {
+  if (!canAssignVouchers(ctx.from.id)) {
+    await ctx.reply('Only support/admin can see pending assignments.');
+    return;
+  }
+  const store = await readStore();
+  await sendPendingAssignmentList(ctx.chat.id, store);
 });
 
 bot.action(/^method:(.+)$/, async (ctx) => {

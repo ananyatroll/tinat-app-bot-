@@ -1,17 +1,31 @@
 # Tinat Telegram Bot
 
-This bot collects a user's chosen package, name, transaction link, and transaction ID, then sends the request to an admin for approval. After approval, it delivers one voucher phrase for the selected package.
+This bot collects a user's selected package, verified phone number, name, and payment details, sends the purchase to an admin for payment verification, and then lets a support operator assign exactly one unused voucher from the correct package.
 
 ## What it does
 
 - Shows an intro and package chooser from `/start`
-- Lets the user choose a package before submitting the request
-- Collects the user's name, transaction link, and transaction ID
-- Pings the admin with approve and reject buttons
-- Reserves one unused phrase from the correct package pool after approval
-- Exports approved requests to an `.xlsx` file with one sheet per package and sends it to the admin chat
-- Stores approved voucher deliveries so `/myaccess` can resend them later
-- Includes a local redemption API the Tinat app can call to redeem voucher phrases
+- Never requires a Telegram username — the Telegram numeric user ID is the primary identity
+- Collects the phone number via Telegram's official contact-sharing button (typed numbers are marked unverified)
+- Validates the payment method (CBE / Telebirr), receipt link, and transaction ID before submitting
+- Sends an approval request to the admin with Approve / Reject buttons
+- Admin approval does **not** hand out a voucher — the purchase becomes available to Support
+- Support assigns one unused voucher from the correct package pool (`/pending` or the Assign buttons)
+- The user receives their voucher phrase in chat only after Support assigns it
+- Exports approved purchases to an `.xlsx` file (one sheet per package) with phone number, voucher code, voucher status, assigned time, and redeemed time
+- Includes the existing local redemption API (`redeem-server.js`) that the Tinat Mini App calls to redeem vouchers once, using Telegram Mini App authentication
+
+## Flow
+
+1. User sends `/start` and picks a package.
+2. Bot asks the user to share their phone number via Telegram's contact-sharing button.
+3. Bot asks for payment method, full name, transaction link, and transaction ID (validated per method).
+4. The purchase (Telegram user ID, phone, username if present, package, payment details) is sent to the admin.
+5. Admin verifies the payment and presses Approve or Reject.
+6. Rejected → the payment is marked rejected, no voucher is issued.
+7. Approved → Support sees the purchase in `/pending`, presses "Assign voucher", and the bot takes one unused code from that package's pool, records ownership, and sends it to the buyer.
+8. The user opens the study app (a Telegram Mini App), which sends `initData` + the voucher code to `redeem-server.js`.
+9. The server verifies the Telegram identity, ownership, payment approval, and voucher state, atomically marks the voucher `REDEEMED`, stores the entitlement, and unlocks the package.
 
 ## Setup
 
@@ -21,22 +35,18 @@ This bot collects a user's chosen package, name, transaction link, and transacti
 4. Start the bot with `npm start`.
 5. Start the local redemption API with `npm run redeem-api`.
 
-## GitHub
-
-This project includes a GitHub Actions workflow in [.github/workflows/ci.yml](.github/workflows/ci.yml) that validates the bot and redemption server on every push or pull request.
-
-The workflow also supports manual runs and a daily scheduled validation, but GitHub Actions still cannot keep the Telegram bot running 24/7.
-
-GitHub cannot keep a Telegram bot running continuously by itself. To keep the bot live, run it on a server, VM, or container host, and use GitHub for source control and validation.
-
 ## Environment variables
 
 - `BOT_TOKEN`: your Telegram bot token from BotFather
 - `ADMIN_CHAT_ID`: your Telegram numeric user ID or group chat ID that should receive approval requests
+- `SUPPORT_CHAT_ID`: Telegram numeric user ID of the support operator who assigns vouchers. Leave empty to let the admin act as support too. The support account must press `/start` on the bot first.
 - `PACKAGES_JSON`: JSON array that defines the packages shown to users and which phrase pool each one uses
 - `PHRASES_DIR`: folder that contains text files with one secret phrase per line, named after each package pool
-- `VOUCHERS_FILE`: optional JSON file for voucher reservations, defaults to `data/vouchers.json`
+- `VOUCHERS_FILE`: optional JSON file for voucher assignments, defaults to `data/vouchers.json`
+- `USERS_FILE`: optional JSON file for purchases and user identity, defaults to `data/users.json`
+- `ENTITLEMENTS_FILE`: optional JSON file for entitlements created on redemption, defaults to `data/entitlements.json`
 - `REDEEM_API_PORT`: port for the local redemption API, defaults to `8787`
+- `REDEEM_RATE_LIMIT_MAX` / `REDEEM_RATE_LIMIT_WINDOW_MS`: anti-guessing limits on the redeem endpoint
 
 Example `PACKAGES_JSON`:
 
@@ -50,18 +60,15 @@ Example `PACKAGES_JSON`:
 ]
 ```
 
-## Flow
+## Roles
 
-- The user sends `/start`.
-- The bot shows a short intro and package options.
-- The bot asks the user to choose a package, then the user's full name, then the transaction link, then the transaction ID.
-- The bot sends the details to the admin chat for manual review.
-- When the admin approves the request, the bot reserves one unused phrase from the matching package pool and sends it to the user.
-- When the admin approves the request, the bot also creates an Excel file in `exports/` with all approved requests so far (one sheet per package) and sends that file to the admin chat.
+- **Admin** (from `ADMIN_CHAT_ID`): verifies payments and approves/rejects purchases.
+- **Support** (from `SUPPORT_CHAT_ID`): sees approved purchases waiting for vouchers (`/pending`) and assigns one unused code from the correct package.
+- **Users**: buyers. They are identified by their Telegram numeric user ID, never by username.
 
 ## Notes
 
 - Put one phrase per line in `phrases/<phrasePool>.txt`.
-- The app backend should verify the phrase, mark it redeemed, and unlock the matching package only once. See [docs/voucher-redemption-contract.md](docs/voucher-redemption-contract.md).
-- If a pool runs out of phrases, approvals for that package should stop until you refill the file.
-- To test redemption locally, POST to `http://127.0.0.1:8787/api/v1/vouchers/redeem` with the JSON body described in the contract.
+- The Excel report is for admin/support reporting only — it is never used as an authentication database.
+- See [docs/voucher-redemption-contract.md](docs/voucher-redemption-contract.md) for the redemption API contract and voucher lifecycle.
+- To test redemption locally, POST to `http://127.0.0.1:8787/api/v1/vouchers/redeem` with a valid Telegram Mini App `initData` and a voucher code.
