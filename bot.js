@@ -118,6 +118,64 @@ function buildPackageKeyboard(packages) {
   };
 }
 
+const PAYMENT_METHODS = [
+  { key: 'cbe', label: 'Commercial Bank of Ethiopia (CBE)' },
+  { key: 'telebirr', label: 'Telebirr' }
+];
+
+const PAYMENT_LINK_PATTERNS = {
+  cbe: /^https:\/\/mbreciept\.cbe\.com\.et\/\S+/i,
+  telebirr: /^https:\/\/transactioninfo\.ethiotelecom\.et\/receipt\/\S+/i
+};
+
+const PAYMENT_ID_PATTERNS = {
+  cbe: /^FT\d{4,}[A-Z0-9]{3,}$/i,
+  telebirr: /^[A-Z]{3}\d{1,}[A-Z0-9]{2,}$/i
+};
+
+function isValidTransactionLink(paymentMethodKey, link) {
+  const pattern = PAYMENT_LINK_PATTERNS[paymentMethodKey];
+  return pattern ? pattern.test(normalizeTransactionLink(link)) : false;
+}
+
+function isValidTransactionId(paymentMethodKey, value) {
+  const pattern = PAYMENT_ID_PATTERNS[paymentMethodKey];
+  return pattern ? pattern.test(normalizeTransactionId(value)) : false;
+}
+
+function getLinkFormatHint(paymentMethodKey) {
+  if (paymentMethodKey === 'cbe') {
+    return 'https://mbreciept.cbe.com.et/<your-receipt-code>';
+  }
+  if (paymentMethodKey === 'telebirr') {
+    return 'https://transactioninfo.ethiotelecom.et/receipt/<your-transaction-id>';
+  }
+  return 'the full receipt link';
+}
+
+function getIdFormatHint(paymentMethodKey) {
+  if (paymentMethodKey === 'cbe') {
+    return 'starts with FT, e.g. FT26222QKMBG';
+  }
+  if (paymentMethodKey === 'telebirr') {
+    return 'letters and digits, e.g. DGJ22CMPJM';
+  }
+  return 'your transaction ID';
+}
+
+function getPaymentMethodByKey(methodKey) {
+  return PAYMENT_METHODS.find((method) => method.key === methodKey) || null;
+}
+
+function buildPaymentMethodKeyboard() {
+  return {
+    inline_keyboard: PAYMENT_METHODS.map((method) => ([{
+      text: method.label,
+      callback_data: `method:${method.key}`
+    }]))
+  };
+}
+
 function normalizePhrase(phrase) {
   return String(phrase || '').trim();
 }
@@ -172,8 +230,9 @@ async function createApprovedWorkbook(store) {
       userName: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
       telegramUsername: user.username || '',
       telegramId: user.id,
-      transactionId: req.transactionId,
-      transactionLink: req.transactionLink,
+    transactionId: req.transactionId,
+    transactionLink: req.transactionLink,
+    paymentMethod: req.paymentMethodLabel || req.paymentMethod || '',
       voucherPhrase: req.voucherPhrase || '',
       status: req.status,
       approvedAt: formatDateForSheet(req.reviewedAt || new Date().toISOString()),
@@ -191,6 +250,7 @@ async function createApprovedWorkbook(store) {
       { header: 'Request ID', key: 'requestId', width: 20 },
       { header: 'Package', key: 'packageLabel', width: 24 },
       { header: 'Price', key: 'price', width: 14 },
+      { header: 'Payment Method', key: 'paymentMethod', width: 22 },
       { header: 'User Name', key: 'userName', width: 22 },
       { header: 'Telegram Username', key: 'telegramUsername', width: 20 },
       { header: 'Telegram ID', key: 'telegramId', width: 16 },
@@ -207,13 +267,28 @@ async function createApprovedWorkbook(store) {
     }
 
     sheet.getRow(1).font = { bold: true };
-    sheet.autoFilter = `A1:L${Math.max(rows.length + 1, 1)}`;
+    sheet.autoFilter = `A1:M${Math.max(rows.length + 1, 1)}`;
   }
 
   const fileName = `approved-${new Date().toISOString().replace(/[:.]/g, '-')}.xlsx`;
   const filePath = path.join(EXPORTS_DIR, fileName);
   await workbook.xlsx.writeFile(filePath);
   return filePath;
+}
+
+function countApprovedRequests(store) {
+  return Object.values(store.requests || {})
+    .filter((req) => req.status === 'approved')
+    .length;
+}
+
+async function exportApprovedExcel(chatId) {
+  const store = await readStore();
+  const count = countApprovedRequests(store);
+  const workbookPath = await createApprovedWorkbook(store);
+  await bot.telegram.sendDocument(chatId, { source: workbookPath, filename: path.basename(workbookPath) }, {
+    caption: `Full export of ${count} approved transaction(s).`
+  });
 }
 
 async function hydrateVoucherStoreFromPhraseFiles(store) {
@@ -321,7 +396,7 @@ function buildAdminReviewMessage(request) {
     `Package: ${request.packageLabel} (${formatMoney(request.priceCents, request.currency)})`,
     `User: ${request.user.firstName || ''} ${request.user.lastName || ''}`.trim(),
     `Telegram: @${request.user.username || 'no_username'} (${request.user.id})`,
-    `Transaction ID: ${request.transactionId}`,
+    `Transaction ID: ${maskTransactionId(request.transactionId)}`,
     `Transaction Link: ${request.transactionLink}`,
     '',
     'Approve only after verifying the payment.'
@@ -336,19 +411,27 @@ function normalizeTransactionId(value) {
   return String(value || '').trim();
 }
 
+function maskTransactionId(value) {
+  const id = String(value || '').trim();
+  if (id.length <= 2) {
+    return '*'.repeat(id.length);
+  }
+  return id.slice(0, 2) + '*'.repeat(id.length - 2);
+}
+
 function getPackageSelectionMessage(packages) {
   return [
     'Choose your package first:',
     ...packages.map((pkg) => `${pkg.label} - ${formatMoney(pkg.priceCents, pkg.currency)}`),
     '',
-    'I will then ask for your name, transaction link, and transaction ID.'
+    'I will then ask for your payment method, name, transaction link, and transaction ID.'
   ].join('\n');
 }
 
 function getStartMessage(packages) {
   return [
     'Welcome to Tinat.',
-    'Pick a package below, then I will ask for your name, transaction link, and transaction ID.',
+    'Pick a package below, then I will ask for your payment method, name, transaction link, and transaction ID.',
     '',
     ...packages.map((pkg) => `${pkg.label} - ${formatMoney(pkg.priceCents, pkg.currency)}`),
     '',
@@ -385,9 +468,10 @@ function buildRequestMessage(request) {
     'New access request pending review:',
     `Request ID: ${request.requestId}`,
     `Package: ${request.packageLabel} (${formatMoney(request.priceCents, request.currency)})`,
+    `Payment Method: ${request.paymentMethodLabel || request.paymentMethod || 'N/A'}`,
     `User: ${request.user.firstName || ''} ${request.user.lastName || ''}`.trim(),
     `Telegram: @${request.user.username || 'no_username'} (${request.user.id})`,
-    `Transaction ID: ${request.transactionId}`,
+    `Transaction ID: ${maskTransactionId(request.transactionId)}`,
     `Transaction Link: ${request.transactionLink}`,
     '',
     'Approve this request only after verifying the payment.'
@@ -480,8 +564,9 @@ async function finalizeRequest(requestId, approvedBy, approved) {
   }));
 
   if (ADMIN_CHAT_ID) {
+    const count = countApprovedRequests(store);
     await bot.telegram.sendDocument(ADMIN_CHAT_ID, { source: workbookPath, filename: path.basename(workbookPath) }, {
-      caption: `Approved data exported for request ${request.requestId}`
+      caption: `Excel updated: ${count} approved transaction(s) (incl. request ${request.requestId}). Use /export to re-download anytime.`
     });
   }
 
@@ -515,7 +600,9 @@ async function submitRequest(ctx, draft) {
       lastName: ctx.from.last_name || null
     },
     transactionLink: draft.transactionLink,
-    transactionId: draft.transactionId
+    transactionId: draft.transactionId,
+    paymentMethod: draft.paymentMethod || null,
+    paymentMethodLabel: draft.paymentMethodLabel || null
   };
 
   setRequest(store, requestId, request);
@@ -534,7 +621,7 @@ async function handleDraftStep(ctx, text) {
     return false;
   }
 
-  if (draft.step === 'package') {
+  if (draft.step === 'package' || draft.step === 'paymentMethod') {
     return false;
   }
 
@@ -548,16 +635,26 @@ async function handleDraftStep(ctx, text) {
   }
 
   if (draft.step === 'transactionLink') {
-    draft.transactionLink = normalizeTransactionLink(text);
+    const link = normalizeTransactionLink(text);
+    if (draft.paymentMethod && !isValidTransactionLink(draft.paymentMethod, link)) {
+      await ctx.reply(`That link does not look like a valid ${draft.paymentMethodLabel || 'receipt'} link. It should look like: ${getLinkFormatHint(draft.paymentMethod)}`);
+      return true;
+    }
+    draft.transactionLink = link;
     draft.step = 'transactionId';
     setDraft(store, ctx.from.id, draft);
     await writeStore(store);
-    await ctx.reply('Send the transaction ID next.');
+    await ctx.reply(`Send the transaction ID next (${getIdFormatHint(draft.paymentMethod)}).`);
     return true;
   }
 
   if (draft.step === 'transactionId') {
-    draft.transactionId = normalizeTransactionId(text);
+    const transactionId = normalizeTransactionId(text);
+    if (draft.paymentMethod && !isValidTransactionId(draft.paymentMethod, transactionId)) {
+      await ctx.reply(`That does not look like a valid ${draft.paymentMethodLabel || ''} transaction ID. It should look like: ${getIdFormatHint(draft.paymentMethod)}`);
+      return true;
+    }
+    draft.transactionId = transactionId;
     await submitRequest(ctx, draft);
     return true;
   }
@@ -582,7 +679,8 @@ bot.command('help', async (ctx) => {
   await ctx.reply([
     'Available commands:',
     '/buy - start the package and verification flow',
-    '/myaccess - resend your approved voucher phrase'
+    '/myaccess - resend your approved voucher phrase',
+    '/export - (admin) download the full Excel of approved transactions'
   ].join('\n'));
 });
 
@@ -615,6 +713,31 @@ bot.command('cancel', async (ctx) => {
   clearDraft(store, ctx.from.id);
   await writeStore(store);
   await ctx.reply('Your current submission has been cancelled.');
+});
+
+bot.command('export', async (ctx) => {
+  if (!ADMIN_CHAT_ID) {
+    await ctx.reply('ADMIN_CHAT_ID is missing. Set it in .env before using /export.');
+    return;
+  }
+
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) {
+    await ctx.reply('Only the admin can export the Excel file.');
+    return;
+  }
+
+  try {
+    await exportApprovedExcel(ctx.chat.id);
+    await ctx.reply('Tap the button below to export the full Excel file anytime.', {
+      reply_markup: {
+        keyboard: [[{ text: 'Export Excel' }]],
+        resize_keyboard: true
+      }
+    });
+  } catch (error) {
+    console.error('Failed to export workbook:', error);
+    await ctx.reply('Export failed. Check the error log.');
+  }
 });
 
 bot.action(/^(approve|reject):(.+)$/, async (ctx) => {
@@ -654,7 +777,7 @@ bot.action(/^package:(.+)$/, async (ctx) => {
 
   const store = await readStore();
   setDraft(store, ctx.from.id, {
-    step: 'name',
+    step: 'paymentMethod',
     packageKey: pkg.key,
     packageLabel: pkg.label,
     priceCents: pkg.priceCents,
@@ -668,8 +791,37 @@ bot.action(/^package:(.+)$/, async (ctx) => {
     `Package selected: ${pkg.label}`,
     `Price: ${formatMoney(pkg.priceCents, pkg.currency)}`,
     '',
-    'Send your full name to continue.'
-  ].join('\n'));
+    'Now choose your payment method:'
+  ].join('\n'), {
+    reply_markup: buildPaymentMethodKeyboard()
+  });
+});
+
+bot.action(/^method:(.+)$/, async (ctx) => {
+  const methodKey = ctx.match[1];
+  const method = getPaymentMethodByKey(methodKey);
+
+  if (!method) {
+    await ctx.answerCbQuery('Unknown payment method.');
+    return;
+  }
+
+  const store = await readStore();
+  const draft = getDraft(store, ctx.from.id);
+
+  if (!draft || draft.step !== 'paymentMethod') {
+    await ctx.answerCbQuery('No active submission. Use /buy to start.');
+    return;
+  }
+
+  draft.paymentMethod = method.key;
+  draft.paymentMethodLabel = method.label;
+  draft.step = 'name';
+  setDraft(store, ctx.from.id, draft);
+  await writeStore(store);
+
+  await ctx.answerCbQuery(`Selected ${method.label}`);
+  await ctx.reply('Send your full name to continue.');
 });
 
 bot.on('message', async (ctx) => {
@@ -678,7 +830,21 @@ bot.on('message', async (ctx) => {
     return;
   }
 
-  const handled = await handleDraftStep(ctx, text.trim());
+  const trimmed = text.trim();
+
+  if (trimmed === 'Export Excel') {
+    if (String(ctx.from.id) === String(ADMIN_CHAT_ID)) {
+      try {
+        await exportApprovedExcel(ctx.chat.id);
+      } catch (error) {
+        console.error('Failed to export workbook:', error);
+        await ctx.reply('Export failed. Check the error log.');
+      }
+    }
+    return;
+  }
+
+  const handled = await handleDraftStep(ctx, trimmed);
   if (!handled && text.startsWith('/')) {
     return;
   }

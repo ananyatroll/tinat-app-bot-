@@ -7,7 +7,7 @@ https://<username>.pythonanywhere.com/telegram-webhook
 
 Core features replicated from the Node.js bot:
   - /start package chooser (EUEE Preo, Freshman, UAT, University Department, Exit Exam)
-  - state machine: awaiting package -> name -> transaction link -> transaction ID
+  - state machine: awaiting package -> payment method (CBE/Telebirr) -> name -> transaction link -> transaction ID
   - admin approval with Approve / Reject inline buttons
   - voucher reservation from phrases/<pool>.txt, tracked in data/vouchers.json
   - Excel export of approved requests (one sheet per package) sent to the admin
@@ -167,6 +167,73 @@ def get_package_selection_message():
     lines += ['%s - %s' % (pkg['label'], format_money(pkg['priceCents'], pkg['currency'])) for pkg in PACKAGES]
     lines += ['', 'I will then ask for your name, transaction link, and transaction ID.']
     return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Payment methods
+# ---------------------------------------------------------------------------
+
+PAYMENT_METHODS = [
+    {'key': 'cbe', 'label': 'Commercial Bank of Ethiopia'},
+    {'key': 'telebirr', 'label': 'Telebirr'},
+]
+
+PAYMENT_LINK_PATTERNS = {
+    'cbe': re.compile(r'^https://mbreciept\.cbe\.com\.et/\S+', re.IGNORECASE),
+    'telebirr': re.compile(r'^https://transactioninfo\.ethiotelecom\.et/receipt/\S+', re.IGNORECASE),
+}
+
+PAYMENT_ID_PATTERNS = {
+    'cbe': re.compile(r'^FT\d{4,}[A-Z0-9]{3,}$', re.IGNORECASE),
+    'telebirr': re.compile(r'^[A-Z]{3}\d{1,}[A-Z0-9]{2,}$', re.IGNORECASE),
+}
+
+
+def is_valid_transaction_link(method_key, link):
+    pattern = PAYMENT_LINK_PATTERNS.get(method_key)
+    return bool(pattern and pattern.match(str(link or '').strip()))
+
+
+def is_valid_transaction_id(method_key, value):
+    pattern = PAYMENT_ID_PATTERNS.get(method_key)
+    return bool(pattern and pattern.match(str(value or '').strip()))
+
+
+def link_format_hint(method_key):
+    if method_key == 'cbe':
+        return 'https://mbreciept.cbe.com.et/<your-receipt-code>'
+    if method_key == 'telebirr':
+        return 'https://transactioninfo.ethiotelecom.et/receipt/<your-transaction-id>'
+    return 'the full receipt link'
+
+
+def id_format_hint(method_key):
+    if method_key == 'cbe':
+        return 'starts with FT, e.g. FT26222QKMBG'
+    if method_key == 'telebirr':
+        return 'letters and digits, e.g. DGJ22CMPJM'
+    return 'your transaction ID'
+
+
+def get_payment_method(method_key):
+    for method in PAYMENT_METHODS:
+        if method['key'] == method_key:
+            return method
+    return None
+
+
+def build_payment_method_keyboard():
+    rows = [[
+        {'text': method['label'], 'callback_data': 'method:%s' % method['key']}
+    ] for method in PAYMENT_METHODS]
+    return {'inline_keyboard': rows}
+
+
+def build_export_keyboard():
+    return {
+        'keyboard': [[{'text': 'Export Excel'}]],
+        'resize_keyboard': True,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +430,13 @@ def send_document(chat_id, file_path, caption=None):
 # ---------------------------------------------------------------------------
 
 
+def mask_transaction_id(value):
+    value = str(value or '').strip()
+    if len(value) <= 2:
+        return '*' * len(value)
+    return value[:2] + '*' * (len(value) - 2)
+
+
 def build_admin_message(request):
     user = request.get('user') or {}
     full_name = ('%s %s' % (user.get('firstName') or '', user.get('lastName') or '')).strip()
@@ -372,8 +446,9 @@ def build_admin_message(request):
         'Package: %s (%s)' % (request['packageLabel'], format_money(request['priceCents'], request['currency'])),
         'User: %s' % full_name,
         'Telegram: @%s (%s)' % (user.get('username') or 'no_username', user.get('id')),
-        'Transaction ID: %s' % request.get('transactionId'),
+        'Transaction ID: %s' % mask_transaction_id(request.get('transactionId')),
         'Transaction Link: %s' % request.get('transactionLink'),
+        'Payment Method: %s' % (request.get('paymentMethodLabel') or request.get('paymentMethod') or 'N/A'),
         '',
         'Approve this request only after verifying the payment.',
     ])
@@ -564,11 +639,11 @@ def redeem_phrase(phrase, user_id='', device_id=''):
 # ---------------------------------------------------------------------------
 
 EXPORT_HEADERS = [
-    'Request ID', 'Package', 'Price', 'User Name', 'Telegram Username',
-    'Telegram ID', 'Transaction ID', 'Transaction Link', 'Voucher Phrase',
-    'Status', 'Approved At', 'Approved By',
+    'Request ID', 'Package', 'Payment Method', 'Price', 'User Name',
+    'Telegram Username', 'Telegram ID', 'Transaction ID', 'Transaction Link',
+    'Voucher Phrase', 'Status', 'Approved At', 'Approved By',
 ]
-EXPORT_WIDTHS = [20, 24, 14, 22, 20, 16, 20, 40, 32, 14, 24, 16]
+EXPORT_WIDTHS = [20, 24, 18, 14, 22, 20, 16, 20, 40, 32, 14, 24, 16]
 
 
 def build_approved_workbook(store):
@@ -594,6 +669,7 @@ def build_approved_workbook(store):
         rows_by_sheet[sheet_name].append([
             req.get('requestId'),
             req.get('packageLabel'),
+            req.get('paymentMethodLabel') or req.get('paymentMethod') or '',
             format_money(req.get('priceCents', 0), req.get('currency')),
             full_name,
             user.get('username') or '',
@@ -638,7 +714,7 @@ def handle_draft_step(user_id, chat_id, text):
             return ('none', None)
 
         step = draft.get('step')
-        if not step or step == 'package':
+        if not step or step in ('package', 'paymentMethod'):
             return ('none', None)
 
         if step == 'name':
@@ -648,11 +724,17 @@ def handle_draft_step(user_id, chat_id, text):
 
         if step == 'transactionLink':
             draft['transactionLink'] = text
+            if not is_valid_transaction_link(draft.get('paymentMethod'), text):
+                return ('ask', 'That link does not look like a valid %s link. It should look like: %s'
+                        % (draft.get('paymentMethodLabel') or 'receipt', link_format_hint(draft.get('paymentMethod'))))
             draft['step'] = 'transactionId'
-            return ('ask', 'Send the transaction ID next.')
+            return ('ask', 'Send the transaction ID next (%s).' % id_format_hint(draft.get('paymentMethod')))
 
         if step == 'transactionId':
             draft['transactionId'] = text
+            if not is_valid_transaction_id(draft.get('paymentMethod'), text):
+                return ('ask', 'That does not look like a valid %s transaction ID. It should look like: %s'
+                        % (draft.get('paymentMethodLabel') or '', id_format_hint(draft.get('paymentMethod'))))
             return ('submit', draft)
 
         return ('none', None)
@@ -689,6 +771,8 @@ def submit_request(user_id, chat_id, draft):
             },
             'transactionLink': draft.get('transactionLink'),
             'transactionId': draft.get('transactionId'),
+            'paymentMethod': draft.get('paymentMethod'),
+            'paymentMethodLabel': draft.get('paymentMethodLabel'),
         }
         store['requests'][request_id] = request
         store['drafts'].pop(user_id, None)
@@ -764,9 +848,12 @@ def finalize_request(request_id, admin_user_id, approved):
     if ADMIN_CHAT_ID:
         try:
             store = read_json(USERS_FILE, default_users())
+            count = sum(1 for r in (store.get('requests') or {}).values()
+                        if r.get('status') == 'approved')
             workbook_path = build_approved_workbook(store)
             send_document(ADMIN_CHAT_ID, workbook_path,
-                          caption='Approved data exported for request %s' % request_id)
+                          caption='Excel updated: %d approved transaction(s) (incl. request %s). Use /export to re-download anytime.'
+                                  % (count, request_id))
         except Exception:
             logger.exception('Failed to export/send workbook for request %s', request_id)
 
@@ -798,7 +885,8 @@ def handle_message(msg):
         send_message(chat_id,
                      'Available commands:\n'
                      '/buy - start the package and verification flow\n'
-                     '/myaccess - resend your approved voucher phrase')
+                     '/myaccess - resend your approved voucher phrase\n'
+                     '/export - (admin) download the full Excel of approved transactions')
         return
 
     if text == '/buy':
@@ -833,6 +921,27 @@ def handle_message(msg):
             voucher.get('packageLabel') or 'Your package', voucher['phrase']))
         return
 
+    if text in ('/export', 'Export Excel'):
+        if not ADMIN_CHAT_ID:
+            send_message(chat_id, 'ADMIN_CHAT_ID is missing. Set it before using /export.')
+            return
+        if user_id != str(ADMIN_CHAT_ID):
+            send_message(chat_id, 'Only the admin can export the Excel file.')
+            return
+        try:
+            store = read_json(USERS_FILE, default_users())
+            count = sum(1 for r in (store.get('requests') or {}).values()
+                        if r.get('status') == 'approved')
+            workbook_path = build_approved_workbook(store)
+            send_document(chat_id, workbook_path,
+                          caption='Full export of %d approved transaction(s).' % count)
+            send_message(chat_id, 'Tap the button below to export the full Excel file anytime.',
+                         reply_markup=build_export_keyboard())
+        except Exception:
+            logger.exception('Failed to export workbook on demand')
+            send_message(chat_id, 'Export failed. Check the error log.')
+        return
+
     if text.startswith('/'):
         return
 
@@ -857,7 +966,7 @@ def handle_callback(cb):
 
         def _select(store):
             store['drafts'][user_id] = {
-                'step': 'name',
+                'step': 'paymentMethod',
                 'packageKey': pkg['key'],
                 'packageLabel': pkg['label'],
                 'priceCents': pkg['priceCents'],
@@ -873,8 +982,33 @@ def handle_callback(cb):
                      'Package selected: %s\n'
                      'Price: %s\n'
                      '\n'
-                     'Send your full name to continue.'
-                     % (pkg['label'], format_money(pkg['priceCents'], pkg['currency'])))
+                     'Now choose your payment method:'
+                     % (pkg['label'], format_money(pkg['priceCents'], pkg['currency'])),
+                     reply_markup=build_payment_method_keyboard())
+        return
+
+    if data.startswith('method:'):
+        method_key = data.split(':', 1)[1]
+        method = get_payment_method(method_key)
+        if not method:
+            answer_callback_query(callback_id, 'Unknown payment method.')
+            return
+
+        def _set_method(store):
+            draft = store['drafts'].get(user_id)
+            if not draft or draft.get('step') != 'paymentMethod':
+                return False
+            draft['paymentMethod'] = method['key']
+            draft['paymentMethodLabel'] = method['label']
+            draft['step'] = 'name'
+            return True
+
+        updated = mutate_json(USERS_FILE, default_users, _set_method)
+        if not updated:
+            answer_callback_query(callback_id, 'No active submission. Use /buy to start.')
+            return
+        answer_callback_query(callback_id, 'Selected %s' % method['label'])
+        send_message(user_id, 'Send your full name to continue.')
         return
 
     if data.startswith('approve:') or data.startswith('reject:'):
