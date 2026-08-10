@@ -1039,10 +1039,18 @@ def _save_draft(user_id, draft):
 
 
 def _submit(data, user_id, draft):
+    """Create (or look up) the request for a user from their finished draft.
+
+    Returns the request. An already-submitted request is returned unchanged
+    except when it was rejected: a rejected request is marked 'superseded' and
+    a fresh one is created so the user can try again."""
     requests = data.setdefault('requests', {})
     existing = requests.get(str(user_id))
     if existing:
-        return existing
+        if existing.get('status') != 'rejected':
+            return existing
+        existing['status'] = 'superseded'
+        existing['updatedAt'] = utcnow()
 
     profile = _get_user_profile(data, user_id)
     package = get_package_by_key(draft.get('package')) or DEFAULT_PACKAGES[0]
@@ -1135,15 +1143,31 @@ def handle_draft_step(user, text):
     return draft, message, reply_markup
 
 
+def build_already_approved_message(request):
+    lines = [
+        'You already have an approved purchase.',
+        'Request ID: %s' % request.get('requestId'),
+        'Your voucher phrase was already sent in this chat. Send /myaccess to see it again.',
+    ]
+    return '\n'.join(lines)
+
+
 def submit_request(user_id, draft):
+    """Submit a finished draft. Messages the buyer appropriately whether the
+    request is new, already pending, already approved, or a re-submit after
+    a rejection. Never goes silent."""
     def _do(data):
         request = _submit(data, user_id, draft)
         return request
 
     request = mutate_json(USERS_FILE, default_users(), _do)
-    if request.get('status') == 'pending':
+    status = request.get('status')
+
+    if status == 'pending':
         send_message(user_id, build_pending_message(request))
         notify_admin(request)
+    elif status in ('approved', 'pending_assignment', 'delivered'):
+        send_message(user_id, build_already_approved_message(request))
     return request
 
 
@@ -1298,6 +1322,10 @@ def handle_message(update):
         draft['step'] = 'submitted'
         _save_draft(chat_id, draft)
         submit_request(chat_id, draft)
+    elif draft and draft.get('step') == 'submitted':
+        send_message(chat_id, 'Your purchase was already submitted. '
+                              'The admin will review it and you will receive your voucher here '
+                              'after approval. Send /myaccess to check your status.')
     return True
 
 
