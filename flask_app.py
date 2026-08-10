@@ -788,7 +788,7 @@ def find_voucher(owner_id, phrase):
     return None
 
 
-def redeem_code(owner_id, phrase):
+def redeem_code(owner_id, phrase, device_id=''):
     """Atomically mark an owned voucher as redeemed and write the entitlement.
     Returns the entitlement record or a dict error."""
     def _redeem(data):
@@ -807,6 +807,8 @@ def redeem_code(owner_id, phrase):
             entry['redeemed'] = True
             entry['redeemedAt'] = utcnow()
             entry['status'] = 'redeemed'
+            entry['redeemedByUserId'] = str(owner_id)
+            entry['redeemedByDeviceId'] = str(device_id or '')
 
             entitlement = {
                 'entitlementId': random_id(16),
@@ -818,6 +820,7 @@ def redeem_code(owner_id, phrase):
                 'redeemedAt': entry['redeemedAt'],
                 'phone': entry.get('phone'),
                 'ownerName': entry.get('ownerName'),
+                'deviceId': str(device_id or ''),
             }
             return entitlement
 
@@ -1507,7 +1510,7 @@ def index():
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'time': utcnow()})
+    return jsonify({'ok': True, 'status': 'ok', 'time': utcnow()})
 
 
 @app.route('/telegram-webhook', methods=['POST'])
@@ -1529,65 +1532,124 @@ def telegram_webhook():
         return jsonify({'ok': False, 'error': 'internal error'}), 200
 
 
+REDEEM_ERROR_HTTP = {
+    'INVALID_CODE': 400,
+    'NOT_ASSIGNED': 400,
+    'ALREADY_REDEEMED': 400,
+    'VOUCHER_REVOKED': 400,
+    'NOT_OWNER': 400,
+    'PAYMENT_NOT_APPROVED': 400,
+    'UNAUTHORIZED': 401,
+    'RATE_LIMITED': 429,
+    'BAD_REQUEST': 400,
+}
+
+
+def _redeem_error(message):
+    """Map an internal redeem_code error message to a contract error code."""
+    mapping = {
+        'No matching voucher found': 'INVALID_CODE',
+        'Voucher is not assigned to you yet': 'NOT_ASSIGNED',
+        'Voucher already redeemed': 'ALREADY_REDEEMED',
+    }
+    return mapping.get(message, 'BAD_REQUEST')
+
+
 @app.route('/api/v1/vouchers/redeem', methods=['POST'])
 def redeem_voucher_api():
     """Redeem a voucher owned by the Telegram user in the Mini App.
 
-    Body: { "initData": "...", "voucherPhrase": "..." }
-    The initData hash is verified against the bot token before the voucher is
-    atomically marked REDEEMED. A matching entitlement is then recorded.
+    Body: { "initData": "...", "code": "G5LE37QI45M2", "deviceId": "..." }
+    `phrase` and `voucherPhrase` are accepted as aliases of `code`. The
+    initData hash is verified against the bot token before the voucher is
+    atomically marked REDEEMED, and an entitlement is recorded.
+
+    Success:  {ok, packageKey, packageLabel, redeemedAt, access}
+    Errors:   {ok: false, error: INVALID_CODE|ALREADY_REDEEMED|...}
     """
     if request.content_type not in ('application/json', 'text/json'):
-        return jsonify({'error': 'Content-Type must be application/json'}), 415
+        return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
 
     body = request.get_json(silent=True) or {}
     init_data = body.get('initData')
-    phrase = str(body.get('voucherPhrase') or '').strip()
+    phrase = str(body.get('code') or body.get('phrase') or body.get('voucherPhrase') or '').strip()
+    device_id = str(body.get('deviceId') or '')
 
     if not phrase:
-        return jsonify({'error': 'voucherPhrase is required'}), 400
+        return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
 
     user = verify_init_data(init_data)
     if user is None:
-        return jsonify({'error': 'Invalid or expired initData'}), 401
+        return jsonify({'ok': False, 'error': 'UNAUTHORIZED'}), 401
 
     owner_id = str(user.get('id'))
     if not rate_limit_redeem(owner_id):
-        return jsonify({'error': 'Too many attempts. Try again later.'}), 429
+        return jsonify({'ok': False, 'error': 'RATE_LIMITED'}), 429
 
-    result = redeem_code(owner_id, phrase)
+    result = redeem_code(owner_id, phrase, device_id)
     if isinstance(result, dict) and 'error' in result:
-        code = 404 if result['error'] in ('No matching voucher found', 'Voucher is not assigned to you yet') else 409
-        return jsonify(result), code
+        error = _redeem_error(result['error'])
+        return jsonify({'ok': False, 'error': error}), REDEEM_ERROR_HTTP[error]
 
-    return jsonify({'ok': True, 'entitlement': result}), 200
+    return jsonify({
+        'ok': True,
+        'packageKey': result.get('packageKey'),
+        'packageLabel': result.get('packageLabel'),
+        'redeemedAt': result.get('redeemedAt'),
+        'access': {
+            'packageKey': result.get('packageKey'),
+            'enabled': True,
+        },
+    }), 200
 
 
 @app.route('/api/v1/vouchers/status', methods=['POST'])
 def voucher_status_api():
-    """Check whether a voucher is still usable, without consuming it.
+    """Check whether a voucher is valid for this user, without consuming it.
 
-    Body: { "initData": "...", "voucherPhrase": "..." }
+    Body: { "initData": "...", "code": "G5LE37QI45M2" }
+    Success: {ok: true, status: ASSIGNED|REDEEMED|..., packageKey, packageLabel}
+    Errors:  {ok: false, error: INVALID_CODE|NOT_OWNER|...}
     """
     if request.content_type not in ('application/json', 'text/json'):
-        return jsonify({'error': 'Content-Type must be application/json'}), 415
+        return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
 
     body = request.get_json(silent=True) or {}
     init_data = body.get('initData')
-    phrase = str(body.get('voucherPhrase') or '').strip()
+    phrase = str(body.get('code') or body.get('phrase') or body.get('voucherPhrase') or '').strip()
 
     if not phrase:
-        return jsonify({'error': 'voucherPhrase is required'}), 400
+        return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
 
     user = verify_init_data(init_data)
     if user is None:
-        return jsonify({'error': 'Invalid or expired initData'}), 401
+        return jsonify({'ok': False, 'error': 'UNAUTHORIZED'}), 401
 
-    voucher = find_voucher(str(user.get('id')), phrase)
-    if voucher is None:
-        return jsonify({'error': 'No matching voucher found'}), 404
+    data = read_json(VOUCHERS_FILE, default_vouchers())
+    issued = data.get('issued') or {}
+    entry = None
+    for candidate in issued.values():
+        if str(candidate.get('phrase')) == phrase:
+            entry = candidate
+            break
 
-    return jsonify({'ok': True, 'status': normalize_voucher_status(voucher)}), 200
+    if entry is None:
+        return jsonify({'ok': False, 'error': 'INVALID_CODE'}), 400
+
+    status = normalize_voucher_status(entry)
+    if status == 'redeemed':
+        return jsonify({'ok': False, 'error': 'ALREADY_REDEEMED'}), 400
+    if str(entry.get('ownerId')) != str(user.get('id')):
+        return jsonify({'ok': False, 'error': 'NOT_OWNER'}), 400
+    if status != 'assigned':
+        return jsonify({'ok': False, 'error': 'NOT_ASSIGNED'}), 400
+
+    return jsonify({
+        'ok': True,
+        'status': 'ASSIGNED',
+        'packageKey': entry.get('packageKey'),
+        'packageLabel': entry.get('packageLabel'),
+    }), 200
 
 
 def register_webhook():

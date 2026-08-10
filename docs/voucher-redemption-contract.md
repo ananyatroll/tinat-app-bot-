@@ -1,6 +1,6 @@
 # Voucher Redemption Contract
 
-This document defines the backend contract that the Tinat study app uses to redeem voucher codes against the existing `redeem-server.js`.
+This document defines the backend contract that the Tinat study app uses to redeem voucher codes. The live implementation is the Flask API (`flask_app.py`, deployed on Railway); `redeem-server.js` is the older Node implementation and is kept for reference.
 
 ## Purpose
 
@@ -105,7 +105,14 @@ All redemption read-modify-write steps run inside a single serialized queue so t
 ## Running
 
 ```bash
-npm run redeem-api   # starts redeem-server.js on REDEEM_API_PORT (default 8787)
+python run_local.py   # Flask app: long-polling bot + redeem API on $PORT (Railway)
 ```
 
 Health check: `GET /health` returns `{ "ok": true }`.
+
+## Endpoints
+
+- `POST /api/v1/vouchers/redeem` — consume a code and grant access
+- `POST /api/v1/vouchers/status` — check a code's validity without consuming it (same auth and error format as `/redeem`)
+
+Both accept `initData` plus `code` (aliases: `phrase`, `voucherPhrase`).
