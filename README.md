@@ -27,13 +27,31 @@ This bot collects a user's selected package, verified phone number, name, and pa
 8. The user opens the study app (a Telegram Mini App), which sends `initData` + the voucher code to `redeem-server.js`.
 9. The server verifies the Telegram identity, ownership, payment approval, and voucher state, atomically marks the voucher `REDEEMED`, stores the entitlement, and unlocks the package.
 
-## Setup
+## Setup (run locally)
 
-1. Install Node.js 18 or newer.
-2. Run `npm install`.
-3. Copy `.env.example` to `.env` and fill in the values.
-4. Start the bot with `npm start`.
-5. Start the local redemption API with `npm run redeem-api`.
+The bot now runs on your own machine in **long-polling mode** (no public URL
+or webhook needed). PythonAnywhere hosting has been discontinued.
+
+1. Install Python 3.11+ and run `pip install -r requirements.txt`.
+2. Copy `.env.example` to `.env` and fill in the values
+   (`TELEGRAM_BOT_TOKEN` or `BOT_TOKEN`, `ADMIN_CHAT_ID`, `SUPPORT_CHAT_ID`).
+3. Start the bot (Flask redeem API + long polling together):
+   `python run_local.py`
+4. Open the bot in Telegram and send `/start`.
+
+Stop it anytime with `Ctrl+C`. The bot state (users, vouchers, entitlements)
+lives in `data/`.
+
+Notes:
+
+- The previous PythonAnywhere webhook was removed via `deleteWebhook`, so
+  Telegram no longer delivers updates to PythonAnywhere and polling won't hit
+  a 409 conflict.
+- `wsgi.py` still exists for PythonAnywhere reference but no longer registers
+  the webhook.
+- A Node.js implementation (`bot.js` / `redeem-server.js`) also exists and can
+  be run with `npm start` / `npm run redeem-api`, but the Flask version is the
+  maintained one.
 
 ## Environment variables
 
