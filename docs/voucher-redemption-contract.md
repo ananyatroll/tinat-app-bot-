@@ -26,7 +26,7 @@ Request body:
 
 ```json
 {
-  "phrase": "golden-peak-horizon",
+  "phrase": "G5LE37QI45M2",
   "userId": "user_123",
   "deviceId": "optional-device-id"
 }
@@ -37,11 +37,11 @@ Response on success:
 ```json
 {
   "ok": true,
-  "packageKey": "premium",
-  "packageLabel": "Premium Package",
+  "packageKey": "euee-preo",
+  "packageLabel": "EUEE Preo",
   "redeemedAt": "2026-08-09T12:00:00.000Z",
   "access": {
-    "packageKey": "premium",
+    "packageKey": "euee-preo",
     "enabled": true
   }
 }

@@ -118,15 +118,6 @@ function buildPackageKeyboard(packages) {
   };
 }
 
-function getPackagePromptMessage(packages) {
-  return [
-    'Choose the package you want to buy:',
-    ...packages.map((pkg) => `- ${pkg.label}: ${formatMoney(pkg.priceCents, pkg.currency)}`),
-    '',
-    'After selecting a package, I will ask for your name, transaction link, and transaction ID.'
-  ].join('\n');
-}
-
 function normalizePhrase(phrase) {
   return String(phrase || '').trim();
 }
@@ -153,48 +144,73 @@ function formatDateForSheet(value) {
   return value ? new Date(value).toISOString() : '';
 }
 
-async function createApprovedWorkbook(request, voucher) {
+async function createApprovedWorkbook(store) {
   await ensureExportsDir();
 
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'tinat-bot';
   workbook.created = new Date();
 
-  const sheet = workbook.addWorksheet('Approved Requests');
-  sheet.columns = [
-    { header: 'Request ID', key: 'requestId', width: 20 },
-    { header: 'Package', key: 'packageLabel', width: 24 },
-    { header: 'Price', key: 'price', width: 14 },
-    { header: 'User Name', key: 'userName', width: 22 },
-    { header: 'Telegram Username', key: 'telegramUsername', width: 20 },
-    { header: 'Telegram ID', key: 'telegramId', width: 16 },
-    { header: 'Transaction ID', key: 'transactionId', width: 20 },
-    { header: 'Transaction Link', key: 'transactionLink', width: 40 },
-    { header: 'Voucher Phrase', key: 'voucherPhrase', width: 32 },
-    { header: 'Status', key: 'status', width: 14 },
-    { header: 'Approved At', key: 'approvedAt', width: 24 },
-    { header: 'Approved By', key: 'approvedBy', width: 16 }
-  ];
+  // One sheet per configured package, plus a catch-all for unknown labels.
+  const workbookData = {};
+  for (const pkg of getPackageList()) {
+    workbookData[pkg.label] = [];
+  }
+  workbookData['Other'] = [];
 
-  sheet.addRow({
-    requestId: request.requestId,
-    packageLabel: request.packageLabel,
-    price: formatMoney(request.priceCents, request.currency),
-    userName: `${request.user.firstName || ''} ${request.user.lastName || ''}`.trim(),
-    telegramUsername: request.user.username || '',
-    telegramId: request.user.id,
-    transactionId: request.transactionId,
-    transactionLink: request.transactionLink,
-    voucherPhrase: voucher.phrase,
-    status: 'approved',
-    approvedAt: formatDateForSheet(request.reviewedAt || new Date().toISOString()),
-    approvedBy: String(request.reviewedBy || '')
-  });
+  const approvedRequests = Object.values(store.requests || {})
+    .filter((req) => req.status === 'approved')
+    .sort((a, b) => String(a.reviewedAt || '').localeCompare(String(b.reviewedAt || '')));
 
-  sheet.getRow(1).font = { bold: true };
-  sheet.autoFilter = 'A1:L2';
+  for (const req of approvedRequests) {
+    const user = req.user || {};
+    const sheetName = workbookData[req.packageLabel] ? req.packageLabel : 'Other';
+    workbookData[sheetName].push({
+      requestId: req.requestId,
+      packageLabel: req.packageLabel,
+      price: formatMoney(req.priceCents, req.currency),
+      userName: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+      telegramUsername: user.username || '',
+      telegramId: user.id,
+      transactionId: req.transactionId,
+      transactionLink: req.transactionLink,
+      voucherPhrase: req.voucherPhrase || '',
+      status: req.status,
+      approvedAt: formatDateForSheet(req.reviewedAt || new Date().toISOString()),
+      approvedBy: String(req.reviewedBy || '')
+    });
+  }
 
-  const fileName = `approved-${request.requestId}.xlsx`;
+  for (const [currentSheetName, rows] of Object.entries(workbookData)) {
+    if (currentSheetName === 'Other' && rows.length === 0) {
+      continue;
+    }
+
+    const sheet = workbook.addWorksheet(currentSheetName);
+    sheet.columns = [
+      { header: 'Request ID', key: 'requestId', width: 20 },
+      { header: 'Package', key: 'packageLabel', width: 24 },
+      { header: 'Price', key: 'price', width: 14 },
+      { header: 'User Name', key: 'userName', width: 22 },
+      { header: 'Telegram Username', key: 'telegramUsername', width: 20 },
+      { header: 'Telegram ID', key: 'telegramId', width: 16 },
+      { header: 'Transaction ID', key: 'transactionId', width: 20 },
+      { header: 'Transaction Link', key: 'transactionLink', width: 40 },
+      { header: 'Voucher Phrase', key: 'voucherPhrase', width: 32 },
+      { header: 'Status', key: 'status', width: 14 },
+      { header: 'Approved At', key: 'approvedAt', width: 24 },
+      { header: 'Approved By', key: 'approvedBy', width: 16 }
+    ];
+
+    for (const row of rows) {
+      sheet.addRow(row);
+    }
+
+    sheet.getRow(1).font = { bold: true };
+    sheet.autoFilter = `A1:L${Math.max(rows.length + 1, 1)}`;
+  }
+
+  const fileName = `approved-${new Date().toISOString().replace(/[:.]/g, '-')}.xlsx`;
   const filePath = path.join(EXPORTS_DIR, fileName);
   await workbook.xlsx.writeFile(filePath);
   return filePath;
@@ -203,12 +219,17 @@ async function createApprovedWorkbook(request, voucher) {
 async function hydrateVoucherStoreFromPhraseFiles(store) {
   let changed = false;
 
-  for (const pkg of getPackageList()) {
-    const currentPool = Array.isArray(store.packages[pkg.phrasePool]?.available)
-      ? store.packages[pkg.phrasePool].available
-      : [];
+  const globalIssued = new Set(
+    Object.values(store.issued || {})
+      .map((record) => normalizePhrase(record.phrase))
+      .filter(Boolean)
+  );
 
-    if (currentPool.length > 0) {
+  for (const pkg of getPackageList()) {
+    const pool = store.packages[pkg.phrasePool] || { available: [], issued: {} };
+    pool.issued = pool.issued || {};
+
+    if (Array.isArray(pool.available) && pool.available.length > 0) {
       continue;
     }
 
@@ -220,18 +241,15 @@ async function hydrateVoucherStoreFromPhraseFiles(store) {
         .map(normalizePhrase)
         .filter(Boolean);
 
-      store.packages[pkg.phrasePool] = {
-        available: phrases,
-        issued: store.packages[pkg.phrasePool]?.issued || {}
-      };
+      // Never re-add phrases that have already been handed out to anyone,
+      // so a code can never be issued to two different people.
+      const freshPhrases = phrases.filter((phrase) => !globalIssued.has(phrase));
+
+      pool.available = freshPhrases;
+      store.packages[pkg.phrasePool] = pool;
       changed = true;
     } catch {
-      if (!store.packages[pkg.phrasePool]) {
-        store.packages[pkg.phrasePool] = {
-          available: [],
-          issued: {}
-        };
-      }
+      store.packages[pkg.phrasePool] = pool;
     }
   }
 
@@ -250,7 +268,22 @@ async function reserveVoucherPhrase(packageKey, request) {
 
   const store = await hydrateVoucherStoreFromPhraseFiles(await readVoucherStore());
   const pool = store.packages[pkg.phrasePool] || { available: [], issued: {} };
-  const phrase = normalizePhrase(pool.available.shift());
+  pool.issued = pool.issued || {};
+
+  const globalIssued = new Set(
+    Object.values(store.issued || {})
+      .map((record) => normalizePhrase(record.phrase))
+      .filter(Boolean)
+  );
+
+  let phrase = '';
+  while (Array.isArray(pool.available) && pool.available.length > 0) {
+    const candidate = normalizePhrase(pool.available.shift());
+    if (candidate && !globalIssued.has(candidate)) {
+      phrase = candidate;
+      break;
+    }
+  }
 
   if (!phrase) {
     throw new Error(`No voucher phrases left for package ${pkg.label}`);
@@ -273,15 +306,12 @@ async function reserveVoucherPhrase(packageKey, request) {
   return pool.issued[String(request.requestId)];
 }
 
-function buildVoucherMessage(record) {
-  return [
-    'Your Tinat access has been approved.',
-    `Package: ${record.packageLabel}`,
-    `Voucher phrase: ${record.voucherPhrase}`,
-    '',
-    'Paste this phrase into the Tinat app to unlock your package.',
-    'The app will send the phrase to the backend, which must verify and redeem it exactly once.'
-  ].join('\n');
+async function getVoucherForUser(userId) {
+  const store = await readVoucherStore();
+  const records = Object.values(store.issued || {})
+    .filter((record) => String(record.userId) === String(userId) && normalizePhrase(record.phrase))
+    .sort((a, b) => String(b.reservedAt || '').localeCompare(String(a.reservedAt || '')));
+  return records[0] || null;
 }
 
 function buildAdminReviewMessage(request) {
@@ -398,6 +428,16 @@ async function notifyAdminAboutRequest(request) {
   });
 }
 
+let voucherMutationQueue = Promise.resolve();
+
+// Serializes read-modify-write operations on the voucher store so two
+// approvals can never reserve the same phrase (no double counting).
+function runExclusiveVoucherMutation(task) {
+  const result = voucherMutationQueue.then(task, task);
+  voucherMutationQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
 async function finalizeRequest(requestId, approvedBy, approved) {
   const store = await readStore();
   const request = getRequest(store, requestId);
@@ -421,7 +461,7 @@ async function finalizeRequest(requestId, approvedBy, approved) {
     return request;
   }
 
-  const voucher = await reserveVoucherPhrase(request.packageKey, request);
+  const voucher = await runExclusiveVoucherMutation(() => reserveVoucherPhrase(request.packageKey, request));
 
   request.deliveredAt = new Date().toISOString();
   request.voucherPhrase = voucher.phrase;
@@ -432,7 +472,7 @@ async function finalizeRequest(requestId, approvedBy, approved) {
   setRequest(store, requestId, request);
   await writeStore(store);
 
-  const workbookPath = await createApprovedWorkbook(request, voucher);
+  const workbookPath = await createApprovedWorkbook(store);
 
   await bot.telegram.sendMessage(request.user.id, buildApprovedMessage({
     packageLabel: request.packageLabel,

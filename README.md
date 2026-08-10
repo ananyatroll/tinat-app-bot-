@@ -9,7 +9,7 @@ This bot collects a user's chosen package, name, transaction link, and transacti
 - Collects the user's name, transaction link, and transaction ID
 - Pings the admin with approve and reject buttons
 - Reserves one unused phrase from the correct package pool after approval
-- Exports approved requests to an `.xlsx` file and sends it to the admin chat
+- Exports approved requests to an `.xlsx` file with one sheet per package and sends it to the admin chat
 - Stores approved voucher deliveries so `/myaccess` can resend them later
 - Includes a local redemption API the Tinat app can call to redeem voucher phrases
 
@@ -20,6 +20,14 @@ This bot collects a user's chosen package, name, transaction link, and transacti
 3. Copy `.env.example` to `.env` and fill in the values.
 4. Start the bot with `npm start`.
 5. Start the local redemption API with `npm run redeem-api`.
+
+## GitHub
+
+This project includes a GitHub Actions workflow in [.github/workflows/ci.yml](.github/workflows/ci.yml) that validates the bot and redemption server on every push or pull request.
+
+The workflow also supports manual runs and a daily scheduled validation, but GitHub Actions still cannot keep the Telegram bot running 24/7.
+
+GitHub cannot keep a Telegram bot running continuously by itself. To keep the bot live, run it on a server, VM, or container host, and use GitHub for source control and validation.
 
 ## Environment variables
 
@@ -34,13 +42,11 @@ Example `PACKAGES_JSON`:
 
 ```json
 [
-	{
-		"key": "basic",
-		"label": "Basic Package",
-		"priceCents": 25000,
-		"currency": "ETB",
-		"phrasePool": "basic"
-	}
+	{"key":"euee-preo","label":"EUEE Preo","priceCents":25000,"currency":"ETB","phrasePool":"euee-preo"},
+	{"key":"freshman","label":"Freshman","priceCents":25000,"currency":"ETB","phrasePool":"freshman"},
+	{"key":"uat","label":"UAT","priceCents":25000,"currency":"ETB","phrasePool":"uat"},
+	{"key":"university-department","label":"University Department","priceCents":25000,"currency":"ETB","phrasePool":"university-department"},
+	{"key":"exit-exam","label":"Exit Exam","priceCents":25000,"currency":"ETB","phrasePool":"exit-exam"}
 ]
 ```
 
@@ -51,7 +57,7 @@ Example `PACKAGES_JSON`:
 - The bot asks the user to choose a package, then the user's full name, then the transaction link, then the transaction ID.
 - The bot sends the details to the admin chat for manual review.
 - When the admin approves the request, the bot reserves one unused phrase from the matching package pool and sends it to the user.
-- When the admin approves the request, the bot also creates an Excel file in `exports/` and sends that file to the admin chat.
+- When the admin approves the request, the bot also creates an Excel file in `exports/` with all approved requests so far (one sheet per package) and sends that file to the admin chat.
 
 ## Notes
 
