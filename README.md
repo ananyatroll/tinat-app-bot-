@@ -9,9 +9,9 @@ This bot collects a user's selected package, verified phone number, name, and pa
 - Collects the phone number via Telegram's official contact-sharing button (typed numbers are marked unverified)
 - Validates the payment method (CBE / Telebirr), receipt link, and transaction ID before submitting
 - Sends an approval request to the admin with Approve / Reject buttons
-- Admin approval does **not** hand out a voucher — the purchase becomes available to Support
-- Support assigns one unused voucher from the correct package pool (`/pending` or the Assign buttons)
-- The user receives their voucher phrase in chat only after Support assigns it
+- Approving a payment immediately reserves one unused voucher from the correct package pool and sends the phrase to the buyer in chat
+- Rejected payments are marked rejected and never issue a voucher
+- Support can still assign a voucher to already-approved purchases that missed one (`/pending` or the Assign buttons)
 - Exports approved purchases to an `.xlsx` file (one sheet per package) with phone number, voucher code, voucher status, assigned time, and redeemed time
 - Includes the existing local redemption API (`redeem-server.js`) that the Tinat Mini App calls to redeem vouchers once, using Telegram Mini App authentication
 
@@ -23,7 +23,7 @@ This bot collects a user's selected package, verified phone number, name, and pa
 4. The purchase (Telegram user ID, phone, username if present, package, payment details) is sent to the admin.
 5. Admin verifies the payment and presses Approve or Reject.
 6. Rejected → the payment is marked rejected, no voucher is issued.
-7. Approved → Support sees the purchase in `/pending`, presses "Assign voucher", and the bot takes one unused code from that package's pool, records ownership, and sends it to the buyer.
+7. Approved → the bot immediately takes one unused code from that package's pool, records ownership, and sends the voucher phrase to the buyer in chat.
 8. The user opens the study app (a Telegram Mini App), which sends `initData` + the voucher code to `redeem-server.js`.
 9. The server verifies the Telegram identity, ownership, payment approval, and voucher state, atomically marks the voucher `REDEEMED`, stores the entitlement, and unlocks the package.
 

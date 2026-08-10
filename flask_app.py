@@ -10,9 +10,10 @@ Feature parity with the current Node.js bot:
   - state machine: package -> phone (verified via Telegram contact share) ->
     payment method (CBE/Telebirr) -> name -> transaction link -> transaction ID
   - admin approval with Approve / Reject inline buttons
-  - support role: approved purchases wait for voucher assignment (/pending or
-    the Assign buttons); the buyer only receives their phrase after support
-    assigns one unused voucher from the correct package pool
+  - Approve immediately reserves one unused voucher from the correct package
+    pool and sends the phrase to the buyer; Reject marks the payment rejected
+  - support role (/pending or the Assign buttons) for assigning vouchers to
+    already-approved purchases that are missing one
   - voucher assignment tracked in data/vouchers.json with owner / phone /
     transaction / assigned-by audit fields
   - Excel export of approved requests (one sheet per package) sent to the admin
@@ -484,13 +485,6 @@ def can_assign_vouchers(user_id):
 # ---------------------------------------------------------------------------
 
 
-def mask_transaction_id(value):
-    value = str(value or '').strip()
-    if len(value) <= 2:
-        return '*' * len(value)
-    return value[:2] + '*' * (len(value) - 2)
-
-
 def build_request_message(request):
     user = request.get('user') or {}
     phone = request.get('phone') or {}
@@ -505,7 +499,7 @@ def build_request_message(request):
         'User: %s' % full_name,
         'Telegram: @%s (%s)' % (user.get('username') or 'no_username', user.get('id')),
         'Phone: %s%s' % (phone_text, phone_verified),
-        'Transaction ID: %s' % mask_transaction_id(request.get('transactionId')),
+        'Transaction ID: %s' % request.get('transactionId'),
         'Transaction Link: %s' % request.get('transactionLink'),
         '',
         'Approve this request only after verifying the payment.',
@@ -618,6 +612,31 @@ def _load_pool_phrases(pool_key):
     return entries
 
 
+def _as_pool_entry(item):
+    if isinstance(item, dict):
+        return {'phrase': str(item.get('phrase') or item.get('code') or ''), 'extra': str(item.get('extra') or '')}
+    return {'phrase': str(item), 'extra': ''}
+
+
+def _normalize_pool(pool):
+    """Migrate older pool layouts (available/issued, plain-string lists) into
+    the current unused/assigned dict layout so reserved phrases are never
+    double-issued when old data is reused."""
+    if 'unused' not in pool:
+        pool['unused'] = []
+        old_available = pool.pop('available', None)
+        if old_available:
+            pool['unused'] = [_as_pool_entry(item) for item in old_available]
+    if 'assigned' not in pool:
+        pool['assigned'] = []
+        old_issued = pool.pop('issued', None)
+        if isinstance(old_issued, dict):
+            pool['assigned'] = [_as_pool_entry(item) for item in old_issued.values()]
+        elif isinstance(old_issued, list):
+            pool['assigned'] = [_as_pool_entry(item) for item in old_issued]
+    return pool
+
+
 def _hydrate_pool(data, pool_key):
     """Ensure 'data' has a complete entry for pool_key. Loads every phrase that
     is not already tracked in the store so new phrase files show up in
@@ -626,6 +645,7 @@ def _hydrate_pool(data, pool_key):
     if pool is None:
         pool = {'unused': [], 'assigned': []}
         data['packages'][pool_key] = pool
+    pool = _normalize_pool(pool)
 
     unused_by_phrase = {str(item['phrase']) for item in pool['unused']}
     assigned_by_phrase = {str(item['phrase']) for item in pool['assigned']}
@@ -1361,9 +1381,28 @@ def handle_callback(update):
     if data.startswith('approve:') and is_admin(user.get('id')):
         request_id = data.split(':', 1)[1]
         req = finalize_request(request_id, 'approved', user)
-        if req:
+        if not req:
+            answer_callback_query(callback_id, 'Request not found')
+            return True
+
+        result = assign_voucher(request_id, user)
+        if result == 'ok':
+            req = get_request_by_id(request_id)
+            if req:
+                send_message(req.get('userId'), build_approved_message(req.get('packageLabel'),
+                                                                     req.get('voucher', {}).get('phrase')))
+            answer_callback_query(callback_id, 'Approved and voucher sent')
+        elif result == 'already':
+            req = get_request_by_id(request_id)
+            if req and req.get('voucher'):
+                send_message(req.get('userId'), build_approved_message(req.get('packageLabel'),
+                                                                     req.get('voucher', {}).get('phrase')))
+            answer_callback_query(callback_id, 'Voucher already assigned')
+        elif result == 'empty':
             send_message(req.get('userId'), build_approved_pending_voucher_message(req))
-        answer_callback_query(callback_id, 'Approved')
+            answer_callback_query(callback_id, 'Approved, but voucher pool is empty')
+        else:
+            answer_callback_query(callback_id, 'Request not found')
         return True
 
     if data.startswith('reject:') and is_admin(user.get('id')):

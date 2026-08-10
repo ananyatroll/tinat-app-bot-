@@ -148,8 +148,8 @@ variables always win), which is handy for running the bot locally.
   payment method (CBE / Telebirr) -> name -> transaction link -> transaction
   ID. The admin chat should receive the review message with Approve/Reject
   buttons.
-- Click **Approve**: the buyer gets a "payment approved" notice, then the
-  support chat can assign the voucher with `/pending` or the Assign buttons.
+- Click **Approve**: the buyer immediately receives their voucher phrase in
+  chat (one unused code from the correct package pool is reserved and sent).
 - Test redemption with a real Telegram Mini App `initData` (see
   [voucher-redemption-contract.md](voucher-redemption-contract.md)):
 
