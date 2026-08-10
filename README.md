@@ -29,8 +29,8 @@ This bot collects a user's selected package, verified phone number, name, and pa
 
 ## Setup (run locally)
 
-The bot now runs on your own machine in **long-polling mode** (no public URL
-or webhook needed). PythonAnywhere hosting has been discontinued.
+The bot can run on your own machine in **long-polling mode** (no public URL
+or webhook needed).
 
 1. Install Python 3.11+ and run `pip install -r requirements.txt`.
 2. Copy `.env.example` to `.env` and fill in the values
@@ -42,11 +42,30 @@ or webhook needed). PythonAnywhere hosting has been discontinued.
 Stop it anytime with `Ctrl+C`. The bot state (users, vouchers, entitlements)
 lives in `data/`.
 
+## Hosting on Railway
+
+Railway deploys the repo with Nixpacks (it reads the `Procfile`). The app
+binds to `0.0.0.0:$PORT`, which is what Railway expects.
+
+1. Create a new Railway project and pick **Deploy from GitHub** (the
+   `ananyatroll/tinat-app-bot-` repo).
+2. Set these service environment variables:
+   - `TELEGRAM_BOT_TOKEN` (or `BOT_TOKEN`)
+   - `ADMIN_CHAT_ID`
+   - `SUPPORT_CHAT_ID`
+3. **Persist the data (important):** Railway's filesystem is wiped on every
+   redeploy, so the bot's state in `data/` would be lost. Add a **Volume**
+   to the service (mount path `/data`) and set `DATA_DIR=/data`. That keeps
+   `users.json`, `vouchers.json` and `entitlements.json` across restarts.
+   Without the volume, every redeploy starts the bot fresh.
+4. Deploy. Long polling starts automatically; no webhook or public URL is
+   needed. You can check it with the `/health` endpoint on the generated
+   Railway URL.
+
 Notes:
 
 - The previous PythonAnywhere webhook was removed via `deleteWebhook`, so
-  Telegram no longer delivers updates to PythonAnywhere and polling won't hit
-  a 409 conflict.
+  polling won't hit a 409 conflict.
 - `wsgi.py` still exists for PythonAnywhere reference but no longer registers
   the webhook.
 - A Node.js implementation (`bot.js` / `redeem-server.js`) also exists and can

@@ -1,9 +1,14 @@
-"""Local runner for the Tinat bot.
+"""Runner for the Tinat bot (local laptop, Railway, or any host).
 
-PythonAnywhere hosted the bot in Telegram webhook mode, which needs a public
-URL. On a laptop there is no public URL, so this runs the bot in long-polling
-mode (getUpdates) and serves the redeem API on http://127.0.0.1:5000 in a
-background thread so the Mini App can still redeem vouchers locally.
+This runs the bot in long-polling mode (getUpdates), which needs no public
+URL and works on a laptop as well as on Railway, and serves the redeem API on
+0.0.0.0:$PORT in a background thread so the Mini App can redeem vouchers.
+
+Environment:
+  HOST (default 0.0.0.0)     interface to bind the Flask server to
+  PORT (default 5000)        port to listen on (Railway sets this)
+  DATA_DIR                   where state JSON lives; on Railway point this
+                             at a mounted persistent volume, e.g. /data
 
 Usage:
     python run_local.py
@@ -78,12 +83,12 @@ def poll_forever():
 
 
 def main():
-    host = flask_app.os.environ.get('LOCAL_HOST', '127.0.0.1')
+    host = flask_app.os.environ.get('HOST', '0.0.0.0')
     port = int(flask_app.os.environ.get('PORT', '5000'))
 
     server_thread = threading.Thread(
         target=flask_app.app.run,
-        kwargs={'host': host, 'port': port, 'use_reloader': False},
+        kwargs={'host': host, 'port': port, 'threaded': True, 'use_reloader': False},
         daemon=True,
         name='flask-redeem-api',
     )
