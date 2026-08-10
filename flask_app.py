@@ -5,29 +5,40 @@ The bot runs entirely inside the request/response cycle of a Flask web worker.
 Telegram is configured in webhook mode and POSTs every update to
 https://<username>.pythonanywhere.com/telegram-webhook
 
-Core features replicated from the Node.js bot:
+Feature parity with the current Node.js bot:
   - /start package chooser (EUEE Preo, Freshman, UAT, University Department, Exit Exam)
-  - state machine: awaiting package -> payment method (CBE/Telebirr) -> name -> transaction link -> transaction ID
+  - state machine: package -> phone (verified via Telegram contact share) ->
+    payment method (CBE/Telebirr) -> name -> transaction link -> transaction ID
   - admin approval with Approve / Reject inline buttons
-  - voucher reservation from phrases/<pool>.txt, tracked in data/vouchers.json
+  - support role: approved purchases wait for voucher assignment (/pending or
+    the Assign buttons); the buyer only receives their phrase after support
+    assigns one unused voucher from the correct package pool
+  - voucher assignment tracked in data/vouchers.json with owner / phone /
+    transaction / assigned-by audit fields
   - Excel export of approved requests (one sheet per package) sent to the admin
-  - redemption API so the Tinat app can redeem a voucher phrase once
+  - redemption API that verifies Telegram Mini App initData, voucher ownership,
+    payment approval and voucher state, then atomically marks the voucher
+    REDEEMED and writes the entitlement to data/entitlements.json
 """
 
 import base64
 import copy
+import hashlib
+import hmac
 import json
 import logging
 import os
+import re
 import secrets
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from urllib.parse import unquote
 
 import requests
 from flask import Flask, jsonify, request
 from openpyxl import Workbook
 from openpyxl.styles import Font
-from openpyxl.utils import get_column_letter
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -55,18 +66,34 @@ def _load_dotenv(path=None):
         pass
 
 
+def _abs_path(value, default):
+    """Resolve a possibly-relative configured path against BASE_DIR so the
+    app works regardless of the process working directory (important on
+    PythonAnywhere, where the WSGI working directory is configurable)."""
+    value = (value or '').strip() or default
+    if not os.path.isabs(value):
+        value = os.path.join(BASE_DIR, value)
+    return os.path.normpath(value)
+
+
 _load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN') or os.environ.get('BOT_TOKEN', '')
 ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID', '')
-PHRASES_DIR = os.environ.get('PHRASES_DIR', os.path.join(BASE_DIR, 'phrases'))
-DATA_DIR = os.environ.get('DATA_DIR', os.path.join(BASE_DIR, 'data'))
-EXPORTS_DIR = os.environ.get('EXPORTS_DIR', os.path.join(BASE_DIR, 'exports'))
-USERS_FILE = os.environ.get('USERS_FILE', os.path.join(DATA_DIR, 'users.json'))
-VOUCHERS_FILE = os.environ.get('VOUCHERS_FILE', os.path.join(DATA_DIR, 'vouchers.json'))
-PROCESSED_UPDATES_FILE = os.environ.get('PROCESSED_UPDATES_FILE', os.path.join(DATA_DIR, 'processed_updates.json'))
+SUPPORT_CHAT_ID = os.environ.get('SUPPORT_CHAT_ID') or ADMIN_CHAT_ID or ''
+DATA_DIR = _abs_path(os.environ.get('DATA_DIR'), os.path.join(BASE_DIR, 'data'))
+PHRASES_DIR = _abs_path(os.environ.get('PHRASES_DIR'), os.path.join(BASE_DIR, 'phrases'))
+EXPORTS_DIR = _abs_path(os.environ.get('EXPORTS_DIR'), os.path.join(BASE_DIR, 'exports'))
+USERS_FILE = _abs_path(os.environ.get('USERS_FILE'), os.path.join(DATA_DIR, 'users.json'))
+VOUCHERS_FILE = _abs_path(os.environ.get('VOUCHERS_FILE'), os.path.join(DATA_DIR, 'vouchers.json'))
+ENTITLEMENTS_FILE = _abs_path(os.environ.get('ENTITLEMENTS_FILE'), os.path.join(DATA_DIR, 'entitlements.json'))
+PROCESSED_UPDATES_FILE = _abs_path(os.environ.get('PROCESSED_UPDATES_FILE'), os.path.join(DATA_DIR, 'processed_updates.json'))
 MAX_RECENT_UPDATES = 500
 UPDATE_DEDUPE_TTL_SECONDS = 60 * 60 * 24
+
+REDEEM_RATE_LIMIT_MAX = int(os.environ.get('REDEEM_RATE_LIMIT_MAX', '5'))
+REDEEM_RATE_LIMIT_WINDOW_MS = int(os.environ.get('REDEEM_RATE_LIMIT_WINDOW_MS', str(10 * 60 * 1000)))
+INIT_DATA_MAX_AGE_SECONDS = int(os.environ.get('INIT_DATA_MAX_AGE_SECONDS', str(24 * 60 * 60)))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -152,11 +179,11 @@ def build_package_keyboard():
 def get_start_message():
     lines = [
         'Welcome to Tinat.',
-        'Pick a package below, then I will ask for your name, transaction link, and transaction ID.',
+        'Pick a package below, then I will ask you to share your phone number, payment method, name, transaction link, and transaction ID.',
         '',
     ]
     lines += ['%s - %s' % (pkg['label'], format_money(pkg['priceCents'], pkg['currency'])) for pkg in PACKAGES]
-    lines += ['', 'After approval, the bot will send you one secret phrase for your selected package.']
+    lines += ['', 'After approval, our support team sends you one secret phrase for your selected package.']
     return '\n'.join(lines)
 
 
@@ -165,7 +192,7 @@ def get_package_selection_message():
         'Choose your package first:',
     ]
     lines += ['%s - %s' % (pkg['label'], format_money(pkg['priceCents'], pkg['currency'])) for pkg in PACKAGES]
-    lines += ['', 'I will then ask for your name, transaction link, and transaction ID.']
+    lines += ['', 'I will then ask you to share your phone number, payment method, name, transaction link, and transaction ID.']
     return '\n'.join(lines)
 
 
@@ -174,7 +201,7 @@ def get_package_selection_message():
 # ---------------------------------------------------------------------------
 
 PAYMENT_METHODS = [
-    {'key': 'cbe', 'label': 'Commercial Bank of Ethiopia'},
+    {'key': 'cbe', 'label': 'Commercial Bank of Ethiopia (CBE)'},
     {'key': 'telebirr', 'label': 'Telebirr'},
 ]
 
@@ -229,10 +256,11 @@ def build_payment_method_keyboard():
     return {'inline_keyboard': rows}
 
 
-def build_export_keyboard():
+def build_phone_share_keyboard():
     return {
-        'keyboard': [[{'text': 'Export Excel'}]],
+        'keyboard': [[{'text': 'Share Phone Number', 'request_contact': True}]],
         'resize_keyboard': True,
+        'one_time_keyboard': True,
     }
 
 
@@ -248,6 +276,11 @@ def utcnow():
 def random_id(length):
     raw = base64.urlsafe_b64encode(secrets.token_bytes(length)).decode('ascii').rstrip('=')
     return raw[:length]
+
+
+def is_plausible_phone(value):
+    digits = re.sub(r'\D', '', str(value or ''))
+    return 9 <= len(digits) <= 15
 
 
 def _acquire_lock(fh):
@@ -309,6 +342,10 @@ def default_vouchers():
     return {'packages': {}, 'issued': {}}
 
 
+def default_entitlements():
+    return {'entitlements': {}}
+
+
 def read_json(path, default):
     with file_locked(path):
         try:
@@ -316,6 +353,25 @@ def read_json(path, default):
                 return json.load(fh)
         except (OSError, ValueError):
             return copy.deepcopy(default)
+
+
+def mutate_json(path, default, fn):
+    """Atomically read -> mutate -> write a JSON file under a file lock.
+
+    fn(data) may return anything; it is returned unchanged."""
+    with file_locked(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            data = copy.deepcopy(default)
+        result = fn(data)
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        tmp_path = path + '.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, path)
+        return result
 
 
 def record_update(update_id):
@@ -349,25 +405,6 @@ def record_update(update_id):
         return False
 
     return mutate_json(PROCESSED_UPDATES_FILE, {}, _record)
-
-
-def mutate_json(path, default, fn):
-    """Atomically read -> mutate -> write a JSON file under a file lock.
-
-    fn(data) may return anything; it is returned unchanged."""
-    with file_locked(path):
-        try:
-            with open(path, 'r', encoding='utf-8') as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            data = copy.deepcopy(default)
-        result = fn(data)
-        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-        tmp_path = path + '.tmp'
-        with open(tmp_path, 'w', encoding='utf-8') as fh:
-            json.dump(data, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, path)
-        return result
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +463,23 @@ def send_document(chat_id, file_path, caption=None):
 
 
 # ---------------------------------------------------------------------------
+# Roles
+# ---------------------------------------------------------------------------
+
+
+def is_admin(user_id):
+    return str(user_id) == str(ADMIN_CHAT_ID)
+
+
+def is_support(user_id):
+    return bool(SUPPORT_CHAT_ID) and str(user_id) == str(SUPPORT_CHAT_ID)
+
+
+def can_assign_vouchers(user_id):
+    return is_admin(user_id) or is_support(user_id)
+
+
+# ---------------------------------------------------------------------------
 # Message builders
 # ---------------------------------------------------------------------------
 
@@ -437,18 +491,22 @@ def mask_transaction_id(value):
     return value[:2] + '*' * (len(value) - 2)
 
 
-def build_admin_message(request):
+def build_request_message(request):
     user = request.get('user') or {}
+    phone = request.get('phone') or {}
+    phone_text = phone.get('number') or 'n/a'
+    phone_verified = ' (verified)' if phone.get('verified') else ' (unverified)'
     full_name = ('%s %s' % (user.get('firstName') or '', user.get('lastName') or '')).strip()
     return '\n'.join([
         'New access request pending review:',
-        'Request ID: %s' % request['requestId'],
-        'Package: %s (%s)' % (request['packageLabel'], format_money(request['priceCents'], request['currency'])),
+        'Request ID: %s' % request.get('requestId'),
+        'Package: %s (%s)' % (request.get('packageLabel'), format_money(request.get('priceCents'), request.get('currency'))),
+        'Payment Method: %s' % (request.get('paymentMethodLabel') or request.get('paymentMethod') or 'N/A'),
         'User: %s' % full_name,
         'Telegram: @%s (%s)' % (user.get('username') or 'no_username', user.get('id')),
+        'Phone: %s%s' % (phone_text, phone_verified),
         'Transaction ID: %s' % mask_transaction_id(request.get('transactionId')),
         'Transaction Link: %s' % request.get('transactionLink'),
-        'Payment Method: %s' % (request.get('paymentMethodLabel') or request.get('paymentMethod') or 'N/A'),
         '',
         'Approve this request only after verifying the payment.',
     ])
@@ -457,9 +515,27 @@ def build_admin_message(request):
 def build_pending_message(request):
     return '\n'.join([
         'Your payment details were submitted.',
-        'Request ID: %s' % request['requestId'],
+        'Request ID: %s' % request.get('requestId'),
         'I sent it to the admin for verification.',
         'You will get your voucher phrase after approval.',
+    ])
+
+
+def build_approved_pending_voucher_message(request):
+    return '\n'.join([
+        'Your payment was approved.',
+        'Our support team is assigning your voucher.',
+        'You will receive your voucher phrase in this chat shortly.',
+        'Request ID: %s' % request.get('requestId'),
+    ])
+
+
+def build_rejected_message(request):
+    return '\n'.join([
+        'Your payment was not approved.',
+        'The admin could not verify the payment details.',
+        'If you believe this is a mistake, submit a new request with /buy.',
+        'Request ID: %s' % request.get('requestId'),
     ])
 
 
@@ -473,10 +549,25 @@ def build_approved_message(package_label, voucher_phrase):
     ])
 
 
+def build_pending_assignment_message(pending):
+    lines = ['Approved purchases waiting for voucher assignment:']
+    if not pending:
+        lines.append('(none)')
+    for index, req in enumerate(pending, start=1):
+        user = req.get('user') or {}
+        phone = (req.get('phone') or {}).get('number') or 'n/a'
+        verified = ' (verified)' if (req.get('phone') or {}).get('verified') else ' (unverified)'
+        full_name = ('%s %s' % (user.get('firstName') or '', user.get('lastName') or '')).strip()
+        lines.append('%d. %s | %s | %s | @%s | %s%s'
+                     % (index, req.get('requestId'), req.get('packageLabel'), full_name,
+                        user.get('username') or 'no_username', phone, verified))
+    return '\n'.join(lines)
+
+
 def notify_admin(request):
     if not ADMIN_CHAT_ID:
         raise RuntimeError('Missing ADMIN_CHAT_ID in environment')
-    send_message(ADMIN_CHAT_ID, build_admin_message(request), reply_markup={
+    send_message(ADMIN_CHAT_ID, build_request_message(request), reply_markup={
         'inline_keyboard': [[
             {'text': 'Approve', 'callback_data': 'approve:%s' % request['requestId']},
             {'text': 'Reject', 'callback_data': 'reject:%s' % request['requestId']},
@@ -485,379 +576,650 @@ def notify_admin(request):
 
 
 # ---------------------------------------------------------------------------
-# Voucher logic
+# Voucher pools
 # ---------------------------------------------------------------------------
 
 
 class PoolEmptyError(Exception):
-    """Raised when a phrase pool has no usable voucher left."""
+    pass
 
 
 def _load_pool_phrases(pool_key):
-    path = os.path.join(PHRASES_DIR, pool_key + '.txt')
-    try:
-        with open(path, 'r', encoding='utf-8') as fh:
-            return [line.strip() for line in fh if line.strip()]
-    except OSError:
-        return []
+    """Read phrases for a pool from a text file inside PHRASES_DIR.
+
+    File layout:
+        <PHRASES_DIR>/<pool_key>.txt        -> phrase per line, ignores blanks
+        <PHRASES_DIR>/<pool_key>@<suffix>.txt -> lines starting with '<phrase>:'
+                                               are split into phrase / extra
+    """
+    directory = PHRASES_DIR
+    phrase_file = os.path.join(directory, '%s.txt' % pool_key)
+    if os.path.exists(phrase_file):
+        with open(phrase_file, 'r', encoding='utf-8') as fh:
+            lines = [line.strip() for line in fh if line.strip()]
+        return [line for line in lines if not line.startswith('#')]
+
+    entries = []
+    if os.path.isdir(directory):
+        prefix = '%s@' % pool_key
+        for name in os.listdir(directory):
+            if not name.startswith(prefix) or not name.endswith('.txt'):
+                continue
+            with open(os.path.join(directory, name), 'r', encoding='utf-8') as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if ':' in line:
+                        phrase, _, extra = line.partition(':')
+                        entries.append({'phrase': phrase.strip(), 'extra': extra.strip()})
+                    else:
+                        entries.append({'phrase': line, 'extra': ''})
+    return entries
 
 
-def _hydrate_pool(store, pkg):
-    """Fill a package pool from phrases/<pool>.txt when it is empty,
-    excluding phrases already handed out to anyone (global dedupe)."""
-    pool_key = pkg['phrasePool']
-    pool = store['packages'].get(pool_key)
+def _hydrate_pool(data, pool_key):
+    """Ensure 'data' has a complete entry for pool_key. Loads every phrase that
+    is not already tracked in the store so new phrase files show up in
+    /assign without a restart."""
+    pool = data['packages'].get(pool_key)
     if pool is None:
-        pool = {'available': [], 'issued': {}}
-        store['packages'][pool_key] = pool
-    pool.setdefault('available', [])
-    pool.setdefault('issued', {})
+        pool = {'unused': [], 'assigned': []}
+        data['packages'][pool_key] = pool
 
-    if pool['available']:
-        return
+    unused_by_phrase = {str(item['phrase']) for item in pool['unused']}
+    assigned_by_phrase = {str(item['phrase']) for item in pool['assigned']}
 
-    global_issued = {
-        str(record.get('phrase') or '').strip()
-        for record in (store.get('issued') or {}).values()
-        if str(record.get('phrase') or '').strip()
-    }
-    pool['available'] = [p for p in _load_pool_phrases(pool_key) if p and p not in global_issued]
+    loaded = _load_pool_phrases(pool_key)
+    for entry in loaded:
+        phrase = entry if isinstance(entry, str) else entry.get('phrase')
+        extra = '' if isinstance(entry, str) else entry.get('extra', '')
+        key = str(phrase)
+        if key in unused_by_phrase or key in assigned_by_phrase:
+            continue
+        pool['unused'].append({'phrase': key, 'extra': extra})
+
+    return pool
 
 
-def reserve_voucher(request):
-    """Reserve one unused phrase for an approved request. Runs under the
-    voucher store file lock so two approvals can never take the same code."""
-    pkg = get_package_by_key(request['packageKey'])
-    if not pkg:
-        raise ValueError('Unknown package: %s' % request['packageKey'])
+def reserve_voucher(pool_key):
+    """Pick and remove the first unused voucher for a pool atomically.
+    Returns {'phrase': ..., 'extra': ...} or raises PoolEmptyError."""
+    def _reserve(data):
+        pool = _hydrate_pool(data, pool_key)
+        if not pool['unused']:
+            raise PoolEmptyError('Pool "%s" is empty' % pool_key)
+        entry = pool['unused'].pop(0)
+        assigned = pool.setdefault('assigned', [])
+        assigned.append(dict(entry))
+        return dict(entry)
 
-    pool_key = pkg['phrasePool']
-    request_id = request['requestId']
-    user_id = str((request.get('user') or {}).get('id'))
+    return mutate_json(VOUCHERS_FILE, default_vouchers(), _reserve)
 
-    def _reserve(store):
-        store.setdefault('packages', {})
-        store.setdefault('issued', {})
-        _hydrate_pool(store, pkg)
 
-        pool = store['packages'][pool_key]
-        available = pool.get('available') or []
-        global_issued = {
-            str(record.get('phrase') or '').strip()
-            for record in (store.get('issued') or {}).values()
-            if str(record.get('phrase') or '').strip()
-        }
+def record_voucher_assignment(entry):
+    """Persist a fully-assigned voucher (with owner details) into the 'issued'
+    map so get_voucher_for_user / find_voucher / redeem_code can find it."""
+    def _record(data):
+        issued = data.setdefault('issued', {})
+        issued[str(entry.get('phrase'))] = entry
+        return True
 
-        phrase = ''
-        while available:
-            candidate = available.pop(0)
-            if candidate and candidate not in global_issued:
-                phrase = candidate
-                break
-
-        if not phrase:
-            raise PoolEmptyError(
-                'No voucher phrases left for package %s. Refill phrases/%s.txt'
-                % (pkg['label'], pool_key)
-            )
-
-        record = {
-            'requestId': request_id,
-            'userId': user_id,
-            'packageKey': pkg['key'],
-            'packageLabel': pkg['label'],
-            'packagePool': pool_key,
-            'phrase': phrase,
-            'status': 'reserved',
-            'reservedAt': utcnow(),
-        }
-        pool['issued'][request_id] = record
-        store['issued'][request_id] = record
-        return record
-
-    return mutate_json(VOUCHERS_FILE, default_vouchers, _reserve)
+    return mutate_json(VOUCHERS_FILE, default_vouchers(), _record)
 
 
 def get_voucher_for_user(user_id):
-    store = read_json(VOUCHERS_FILE, default_vouchers())
-    records = [
-        record for record in (store.get('issued') or {}).values()
-        if str(record.get('userId')) == str(user_id) and str(record.get('phrase') or '').strip()
-    ]
-    records.sort(key=lambda r: str(r.get('reservedAt') or ''), reverse=True)
-    return records[0] if records else None
+    """Look up the most recently assigned, not-yet-redeemed voucher of a user."""
+    data = read_json(VOUCHERS_FILE, default_vouchers())
+    issued = data.get('issued') or {}
+    entries = []
+    for entry in issued.values():
+        if str(entry.get('ownerId')) != str(user_id):
+            continue
+        status = normalize_voucher_status(entry)
+        if status in ('assigned', 'issued'):
+            entries.append(entry)
+    if not entries:
+        return None
+    entries.sort(key=lambda item: str(item.get('assignedAt') or ''), reverse=True)
+    return entries[0]
 
 
-def redeem_phrase(phrase, user_id='', device_id=''):
-    """Atomically mark a reserved phrase as redeemed. Shared by both the
-    /api/redeem and /api/v1/vouchers/redeem endpoints."""
-    phrase = str(phrase or '').strip()
-    if not phrase:
-        return {'ok': False, 'error': 'INVALID_PHRASE'}
+def normalize_voucher_status(entry):
+    if entry.get('redeemed'):
+        return 'redeemed'
+    if entry.get('disbursed') or entry.get('sent'):
+        return 'disbursed'
+    if entry.get('assigned'):
+        return 'assigned'
+    return 'issued'
 
-    def _redeem(store):
-        found_pool_key = None
-        found_voucher = None
-        for pool_key, pool in (store.get('packages') or {}).items():
-            for voucher in (pool.get('issued') or {}).values():
-                if str(voucher.get('phrase') or '').strip() == phrase:
-                    found_pool_key = pool_key
-                    found_voucher = voucher
-                    break
-            if found_voucher:
-                break
 
-        if not found_voucher:
-            return {'ok': False, 'error': 'INVALID_PHRASE'}
+# ---------------------------------------------------------------------------
+# Redemption API helpers
+# ---------------------------------------------------------------------------
 
-        if found_voucher.get('status') == 'redeemed':
-            return {'ok': False, 'error': 'ALREADY_REDEEMED'}
 
-        now = utcnow()
-        found_voucher['status'] = 'redeemed'
-        found_voucher['redeemedAt'] = now
-        found_voucher['redeemedByUserId'] = str(user_id or '')
-        found_voucher['redeemedByDeviceId'] = str(device_id or '')
-        store['issued'][found_voucher['requestId']] = found_voucher
+def verify_init_data(init_data):
+    """Validate a Telegram Mini App initData string.
 
-        return {
-            'ok': True,
-            'packageKey': found_voucher.get('packageKey'),
-            'packageLabel': found_voucher.get('packageLabel') or found_voucher.get('packageKey'),
-            'redeemedAt': now,
-            'access': {
-                'packageKey': found_voucher.get('packageKey'),
-                'enabled': True,
-            },
-        }
+    Returns the parsed user object (dict) when the data is authentic and
+    within INIT_DATA_MAX_AGE_SECONDS, otherwise returns None.
 
-    return mutate_json(VOUCHERS_FILE, default_vouchers, _redeem)
+    initData format (urlencoded pairs, sorted, joined with '\\n'):
+        auth_date=<unix>\\nquery_id=<..>\\nuser=<urlencoded-json>...&hash=<sha256>
+    The hash is the HMAC-SHA256 of that signature string using a secret key
+    derived from the bot token.
+    """
+    if not init_data or not TELEGRAM_BOT_TOKEN:
+        return None
+
+    try:
+        parsed = dict(pair.split('=', 1) for pair in str(init_data).split('&'))
+    except ValueError:
+        return None
+
+    received_hash = parsed.pop('hash', None)
+    if not received_hash:
+        return None
+
+    auth_date = parsed.get('auth_date')
+    try:
+        if abs(int(auth_date) - time.time()) > INIT_DATA_MAX_AGE_SECONDS:
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    signature = '\n'.join('%s=%s' % (k, parsed[k]) for k in sorted(parsed))
+    secret_key = hmac.new(b'WebAppData', TELEGRAM_BOT_TOKEN.encode('utf-8'), hashlib.sha256).digest()
+    expected_hash = hmac.new(secret_key, signature.encode('utf-8'), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_hash, received_hash):
+        return None
+
+    try:
+        user = json.loads(unquote(parsed.get('user', '{}')))
+    except ValueError:
+        user = None
+    return user if isinstance(user, dict) else None
+
+
+RATE_LIMIT = {}
+
+
+def rate_limit_redeem(user_key, max_hits=REDEEM_RATE_LIMIT_MAX, window_ms=REDEEM_RATE_LIMIT_WINDOW_MS):
+    now_ms = int(time.time() * 1000)
+    hits = [ts for ts in RATE_LIMIT.get(user_key, []) if now_ms - ts < window_ms]
+    if len(hits) >= max_hits:
+        RATE_LIMIT[user_key] = hits
+        return False
+    hits.append(now_ms)
+    RATE_LIMIT[user_key] = hits
+    return True
+
+
+def find_voucher(owner_id, phrase):
+    data = read_json(VOUCHERS_FILE, default_vouchers())
+    issued = data.get('issued') or {}
+    for entry in issued.values():
+        if str(entry.get('ownerId')) != str(owner_id):
+            continue
+        if str(entry.get('phrase')) == str(phrase):
+            return entry
+    return None
+
+
+def redeem_code(owner_id, phrase):
+    """Atomically mark an owned voucher as redeemed and write the entitlement.
+    Returns the entitlement record or a dict error."""
+    def _redeem(data):
+        issued = data.setdefault('issued', {})
+        for key, entry in issued.items():
+            if str(entry.get('ownerId')) != str(owner_id):
+                continue
+            if str(entry.get('phrase')) != str(phrase):
+                continue
+            status = normalize_voucher_status(entry)
+            if status == 'redeemed':
+                return {'error': 'Voucher already redeemed'}
+            if status != 'assigned':
+                return {'error': 'Voucher is not assigned to you yet'}
+
+            entry['redeemed'] = True
+            entry['redeemedAt'] = utcnow()
+            entry['status'] = 'redeemed'
+
+            entitlement = {
+                'entitlementId': random_id(16),
+                'ownerId': str(owner_id),
+                'phrase': entry.get('phrase'),
+                'packageKey': entry.get('packageKey'),
+                'packageLabel': entry.get('packageLabel'),
+                'assignedAt': entry.get('assignedAt'),
+                'redeemedAt': entry['redeemedAt'],
+                'phone': entry.get('phone'),
+                'ownerName': entry.get('ownerName'),
+            }
+            return entitlement
+
+        return {'error': 'No matching voucher found'}
+
+    result = mutate_json(VOUCHERS_FILE, default_vouchers(), _redeem)
+    if isinstance(result, dict) and 'error' in result:
+        return result
+
+    entitlement = result
+
+    def _record(data):
+        data.setdefault('entitlements', {})[entitlement['entitlementId']] = entitlement
+        return True
+
+    mutate_json(ENTITLEMENTS_FILE, default_entitlements(), _record)
+    return entitlement
 
 
 # ---------------------------------------------------------------------------
 # Excel export
 # ---------------------------------------------------------------------------
 
+
 EXPORT_HEADERS = [
-    'Request ID', 'Package', 'Payment Method', 'Price', 'User Name',
-    'Telegram Username', 'Telegram ID', 'Transaction ID', 'Transaction Link',
-    'Voucher Phrase', 'Status', 'Approved At', 'Approved By',
+    'Request ID', 'Package', 'User', 'Telegram Username', 'User ID', 'Phone',
+    'Payment Method', 'Transaction ID', 'Transaction Link', 'Voucher Phrase',
+    'Status', 'Approved At', 'Voucher Assigned At', 'Voucher Owner ID',
+    'Owner Phone', 'Owner Name',
 ]
-EXPORT_WIDTHS = [20, 24, 18, 14, 22, 20, 16, 20, 40, 32, 14, 24, 16]
 
 
-def build_approved_workbook(store):
+def write_exports(requests_by_package):
+    """Write one Excel file per package plus a totals file.
+
+    requests_by_package: {package_key: [request, ...]}
+    Voucher/assignment columns are filled from vouchers.json 'issued' entries.
+    Returns a list of written file paths.
+    """
     os.makedirs(EXPORTS_DIR, exist_ok=True)
+    voucher_data = read_json(VOUCHERS_FILE, default_vouchers())
+    approved_map = {}
+    for entry in (voucher_data.get('issued') or {}).values():
+        if entry.get('requestId'):
+            approved_map[entry['requestId']] = entry
 
-    workbook = Workbook()
-    workbook.remove(workbook.active)
+    written = []
+    for package_key, requests in requests_by_package.items():
+        pkg = get_package_by_key(package_key)
+        label = (pkg['label'] if pkg else package_key).replace(' ', '_')
+        filename = '%s_%s.xlsx' % (datetime.now().strftime('%Y%m%d_%H%M%S'), label)
+        file_path = os.path.join(EXPORTS_DIR, filename)
+        write_excel_requests(file_path, requests, approved_map=approved_map)
+        written.append(file_path)
 
-    rows_by_sheet = {pkg['label']: [] for pkg in PACKAGES}
-    rows_by_sheet['Other'] = []
+    totals_path = os.path.join(EXPORTS_DIR,
+                               '%s_all_packages.xlsx' % datetime.now().strftime('%Y%m%d_%H%M%S'))
+    write_excel_totals(totals_path, requests_by_package)
+    written.append(totals_path)
+    return written
 
-    approved = [
-        req for req in (store.get('requests') or {}).values()
-        if req.get('status') == 'approved'
-    ]
-    approved.sort(key=lambda req: str(req.get('reviewedAt') or ''))
 
-    for req in approved:
-        user = req.get('user') or {}
-        label = req.get('packageLabel')
-        sheet_name = label if label in rows_by_sheet else 'Other'
-        full_name = ('%s %s' % (user.get('firstName') or '', user.get('lastName') or '')).strip()
-        rows_by_sheet[sheet_name].append([
+def write_excel_requests(file_path, requests, approved_map=None):
+    """Rows: one per request. Voucher/assignment columns filled from the
+    approved entries only when the request belongs to that package."""
+    approved_map = approved_map or {}
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Requests'
+    _write_excel_headers(ws, EXPORT_HEADERS)
+
+    for req in requests:
+        voucher = approved_map.get(req.get('requestId'))
+        ws.append([
             req.get('requestId'),
             req.get('packageLabel'),
-            req.get('paymentMethodLabel') or req.get('paymentMethod') or '',
-            format_money(req.get('priceCents', 0), req.get('currency')),
-            full_name,
-            user.get('username') or '',
-            user.get('id'),
-            req.get('transactionId'),
-            req.get('transactionLink'),
-            req.get('voucherPhrase') or '',
-            req.get('status'),
-            str(req.get('reviewedAt') or ''),
-            str(req.get('reviewedBy') or ''),
+            ('%s %s' % ((req.get('user') or {}).get('firstName') or '',
+                        (req.get('user') or {}).get('lastName') or '')).strip(),
+            (req.get('user') or {}).get('username') or '',
+            (req.get('user') or {}).get('id') or '',
+            (req.get('phone') or {}).get('number') or '',
+            req.get('paymentMethodLabel') or '',
+            req.get('transactionId') or '',
+            req.get('transactionLink') or '',
+            (voucher or {}).get('phrase') if voucher else '',
+            normalize_voucher_status(voucher) if voucher else req.get('status') or '',
+            req.get('approvedAt') or '',
+            (voucher or {}).get('assignedAt') if voucher else '',
+            (voucher or {}).get('ownerId') if voucher else '',
+            (voucher or {}).get('phone') if voucher else '',
+            (voucher or {}).get('ownerName') if voucher else '',
         ])
 
-    for sheet_name, rows in rows_by_sheet.items():
-        if sheet_name == 'Other' and not rows:
-            continue
-        sheet = workbook.create_sheet(sheet_name)
-        sheet.append(EXPORT_HEADERS)
-        for index, width in enumerate(EXPORT_WIDTHS, start=1):
-            sheet.column_dimensions[get_column_letter(index)].width = width
-        for cell in sheet[1]:
-            cell.font = Font(bold=True)
-        for row in rows:
-            sheet.append(row)
-        if rows:
-            sheet.auto_filter.ref = sheet.dimensions
+    _autofit_excel(ws)
+    wb.save(file_path)
 
-    filename = 'approved-%s.xlsx' % utcnow().replace(':', '-').replace('.', '-')
-    file_path = os.path.join(EXPORTS_DIR, filename)
-    workbook.save(file_path)
-    return file_path
+
+def write_excel_totals(file_path, requests_by_package):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Summary'
+    _write_excel_headers(ws, ['Package', 'Total Requests', 'Approved', 'Pending', 'Rejected'])
+
+    for package_key, requests in requests_by_package.items():
+        pkg = get_package_by_key(package_key)
+        label = pkg['label'] if pkg else package_key
+        approved = sum(1 for req in requests if req.get('status') == 'approved')
+        pending = sum(1 for req in requests if req.get('status') in ('pending', 'processing'))
+        rejected = sum(1 for req in requests if req.get('status') == 'rejected')
+        ws.append([label, len(requests), approved, pending, rejected])
+
+    _autofit_excel(ws)
+    wb.save(file_path)
+
+
+def _write_excel_headers(ws, headers):
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+
+def _autofit_excel(ws):
+    widths = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value is None:
+                continue
+            value_len = len(str(cell.value))
+            if value_len > widths.get(cell.column_letter, 0):
+                widths[cell.column_letter] = value_len
+    for letter, width in widths.items():
+        ws.column_dimensions[letter].width = min(max(width + 2, 10), 60)
 
 
 # ---------------------------------------------------------------------------
-# State machine / request handling
+# Store / user / draft helpers
 # ---------------------------------------------------------------------------
 
 
-def handle_draft_step(user_id, chat_id, text):
-    def _step(store):
-        draft = store['drafts'].get(user_id)
-        if not draft:
-            return ('none', None)
-
-        step = draft.get('step')
-        if not step or step in ('package', 'paymentMethod'):
-            return ('none', None)
-
-        if step == 'name':
-            draft['name'] = text
-            draft['step'] = 'transactionLink'
-            return ('ask', 'Send the transaction link next.')
-
-        if step == 'transactionLink':
-            draft['transactionLink'] = text
-            if not is_valid_transaction_link(draft.get('paymentMethod'), text):
-                return ('ask', 'That link does not look like a valid %s link. It should look like: %s'
-                        % (draft.get('paymentMethodLabel') or 'receipt', link_format_hint(draft.get('paymentMethod'))))
-            draft['step'] = 'transactionId'
-            return ('ask', 'Send the transaction ID next (%s).' % id_format_hint(draft.get('paymentMethod')))
-
-        if step == 'transactionId':
-            draft['transactionId'] = text
-            if not is_valid_transaction_id(draft.get('paymentMethod'), text):
-                return ('ask', 'That does not look like a valid %s transaction ID. It should look like: %s'
-                        % (draft.get('paymentMethodLabel') or '', id_format_hint(draft.get('paymentMethod'))))
-            return ('submit', draft)
-
-        return ('none', None)
-
-    code, payload = mutate_json(USERS_FILE, default_users, _step)
-
-    if code == 'ask':
-        send_message(chat_id, payload)
-    elif code == 'submit':
-        submit_request(user_id, chat_id, payload)
+def _store_user_profile(data, user):
+    uid = str(user.get('id'))
+    users = data.setdefault('users', {})
+    users[uid] = {
+        'firstName': user.get('first_name') or user.get('firstName') or '',
+        'lastName': user.get('last_name') or user.get('lastName') or '',
+        'username': user.get('username') or '',
+        'languageCode': user.get('language_code') or '',
+        'lastSeen': utcnow(),
+    }
 
 
-def submit_request(user_id, chat_id, draft):
-    request_id = random_id(10)
+def _get_user_profile(data, user_id):
+    return (data.get('users') or {}).get(str(user_id)) or {}
+
+
+def _new_request(user_id, profile, package, phone):
     now = utcnow()
+    return {
+        'requestId': random_id(12),
+        'userId': str(user_id),
+        'user': {
+            'id': str(user_id),
+            'firstName': profile.get('firstName') or '',
+            'lastName': profile.get('lastName') or '',
+            'username': profile.get('username') or '',
+            'languageCode': profile.get('languageCode') or '',
+        },
+        'packageKey': package['key'],
+        'packageLabel': package['label'],
+        'priceCents': package['priceCents'],
+        'currency': package['currency'],
+        'phrasePool': package['phrasePool'],
+        'phone': {
+            'number': (phone or {}).get('number'),
+            'verified': bool((phone or {}).get('verified')),
+        },
+        'status': 'draft',
+        'paymentMethod': None,
+        'paymentMethodLabel': None,
+        'transactionLink': None,
+        'transactionId': None,
+        'createdAt': now,
+        'updatedAt': now,
+        'messageId': None,
+        'approvedAt': None,
+        'rejectedAt': None,
+        'voucher': None,
+    }
 
-    def _submit(store):
-        if user_id in store['users']:
-            return ('already', None)
 
-        request = {
-            'requestId': request_id,
-            'status': 'pending',
-            'submittedAt': now,
-            'packageKey': draft['packageKey'],
-            'packageLabel': draft['packageLabel'],
-            'priceCents': draft['priceCents'],
-            'currency': draft['currency'],
-            'user': {
-                'id': user_id,
-                'username': draft.get('username'),
-                'firstName': draft.get('name'),
-                'lastName': draft.get('last_name'),
-            },
-            'transactionLink': draft.get('transactionLink'),
-            'transactionId': draft.get('transactionId'),
-            'paymentMethod': draft.get('paymentMethod'),
-            'paymentMethodLabel': draft.get('paymentMethodLabel'),
-        }
-        store['requests'][request_id] = request
-        store['drafts'].pop(user_id, None)
-        return ('submitted', request)
+def _new_draft(user_id):
+    return {
+        'userId': str(user_id),
+        'step': 'package',
+        'package': None,
+        'phone': None,
+        'method': None,
+        'name': None,
+        'link': None,
+        'txid': None,
+        'updatedAt': utcnow(),
+    }
 
-    code, request = mutate_json(USERS_FILE, default_users, _submit)
 
-    if code == 'already':
-        send_message(chat_id, 'You already have approved access. Use /myaccess to get your login details again.')
-        return
+def _get_draft(user_id):
+    def _read(data):
+        drafts = data.setdefault('drafts', {})
+        return drafts.get(str(user_id))
 
-    send_message(chat_id, build_pending_message(request))
-    try:
+    return mutate_json(USERS_FILE, default_users(), _read)
+
+
+def _save_draft(user_id, draft):
+    def _write(data):
+        data.setdefault('drafts', {})[str(user_id)] = draft
+        return True
+
+    return mutate_json(USERS_FILE, default_users(), _write)
+
+
+def _submit(data, user_id, draft):
+    requests = data.setdefault('requests', {})
+    existing = requests.get(str(user_id))
+    if existing:
+        return existing
+
+    profile = _get_user_profile(data, user_id)
+    package = get_package_by_key(draft.get('package')) or DEFAULT_PACKAGES[0]
+    phone = draft.get('phone') or {}
+    request = _new_request(user_id, profile, package, phone)
+    request.update({
+        'paymentMethod': draft.get('method'),
+        'paymentMethodLabel': (get_payment_method(draft.get('method')) or {}).get('label'),
+        'name': draft.get('name'),
+        'transactionLink': draft.get('link'),
+        'transactionId': draft.get('txid'),
+        'status': 'pending',
+        'updatedAt': utcnow(),
+    })
+    requests[str(user_id)] = request
+    return request
+
+
+# ---------------------------------------------------------------------------
+# Flow: state machine steps
+# ---------------------------------------------------------------------------
+
+
+def handle_draft_step(user, text):
+    """Advance a buyer's draft by one step. Returns (draft, message, reply_markup)."""
+    user_id = user.get('id')
+    draft = _get_draft(user_id) or _new_draft(user_id)
+    step = draft.get('step')
+    message = None
+    reply_markup = None
+
+    if step == 'package':
+        package = get_package_by_key(text)
+        if not package:
+            return draft, get_package_selection_message(), build_package_keyboard()
+        draft.update({'package': package['key'], 'step': 'phone', 'updatedAt': utcnow()})
+        _save_draft(user_id, draft)
+        message = ('Package: %s\n'
+                   'Price: %s\n'
+                   'Now share your phone number using the button below.')
+        message = message % (package['label'], format_money(package['priceCents'], package['currency']))
+        reply_markup = build_phone_share_keyboard()
+
+    elif step == 'phone':
+        draft.update({'phone': {'number': text, 'verified': False}, 'step': 'method', 'updatedAt': utcnow()})
+        _save_draft(user_id, draft)
+        message = 'How do you want to pay?'
+        reply_markup = build_payment_method_keyboard()
+
+    elif step == 'method':
+        method = get_payment_method(text)
+        if not method:
+            message = 'Invalid payment method. Use a button below.'
+            reply_markup = build_payment_method_keyboard()
+            return draft, message, reply_markup
+        draft.update({'method': method['key'], 'step': 'name', 'updatedAt': utcnow()})
+        _save_draft(user_id, draft)
+        message = 'Great. What is your full name?'
+
+    elif step == 'name':
+        draft.update({'name': text.strip(), 'step': 'link', 'updatedAt': utcnow()})
+        _save_draft(user_id, draft)
+        message = ('Send the full transaction link of your payment.\n'
+                   'Format: %s') % link_format_hint(draft.get('method'))
+
+    elif step == 'link':
+        method = draft.get('method')
+        if not is_valid_transaction_link(method, text):
+            message = ('That link does not look like a %s receipt.\n'
+                       'Expected format: %s\n'
+                       'Send the full link again.') % (get_payment_method(method)['label'],
+                                                       link_format_hint(method))
+            return draft, message, None
+        draft.update({'link': text.strip(), 'step': 'txid', 'updatedAt': utcnow()})
+        _save_draft(user_id, draft)
+        message = ('Now send your transaction ID.\n'
+                   'Format: %s') % id_format_hint(method)
+
+    elif step == 'txid':
+        method = draft.get('method')
+        if not is_valid_transaction_id(method, text):
+            message = ('That transaction ID does not look valid for %s.\n'
+                       'It should %s.\n'
+                       'Try again.') % (get_payment_method(method)['label'], id_format_hint(method))
+            return draft, message, None
+        draft.update({'txid': text.strip(), 'step': 'done', 'updatedAt': utcnow()})
+        _save_draft(user_id, draft)
+        return draft, None, None
+
+    return draft, message, reply_markup
+
+
+def submit_request(user_id, draft):
+    def _do(data):
+        request = _submit(data, user_id, draft)
+        return request
+
+    request = mutate_json(USERS_FILE, default_users(), _do)
+    if request.get('status') == 'pending':
+        send_message(user_id, build_pending_message(request))
         notify_admin(request)
-    except Exception:
-        logger.exception('Failed to notify admin for request %s', request_id)
+    return request
 
 
-def finalize_request(request_id, admin_user_id, approved):
-    """Approve/reject a pending request. On approval, reserves the voucher
-    atomically first so the request only flips to approved if a phrase is
-    actually available."""
-    if approved:
-        try:
-            def _approve(store):
-                req = store['requests'].get(request_id)
-                if not req or req.get('status') != 'pending':
-                    return ('exists', req)
-                voucher = reserve_voucher(req)
-                now = utcnow()
+def finalize_request(request_id, decision, admin_user):
+    """decision: 'approved' or 'rejected'."""
+    def _do(data):
+        requests = data.get('requests') or {}
+        for req in requests.values():
+            if req.get('requestId') != request_id:
+                continue
+            if decision == 'approved':
                 req['status'] = 'approved'
-                req['reviewedAt'] = now
-                req['reviewedBy'] = admin_user_id
-                req['deliveredAt'] = now
-                req['voucherPhrase'] = voucher['phrase']
-                req['voucherStatus'] = 'delivered'
-                req['excelExportAt'] = now
-                user_id = str((req.get('user') or {}).get('id'))
-                store['drafts'].pop(user_id, None)
-                store['users'][user_id] = {'id': user_id, 'approvedAt': now}
-                return ('approved', req)
+                req['approvedAt'] = utcnow()
+                req['approvedBy'] = str(admin_user.get('id'))
+            else:
+                req['status'] = 'rejected'
+                req['rejectedAt'] = utcnow()
+                req['rejectedBy'] = str(admin_user.get('id'))
+            req['updatedAt'] = utcnow()
+            return req
+        return None
 
-            code, request = mutate_json(USERS_FILE, default_users, _approve)
-        except PoolEmptyError as exc:
-            logger.error('Pool empty for request %s: %s', request_id, exc)
-            if ADMIN_CHAT_ID:
-                send_message(ADMIN_CHAT_ID, 'Could not approve request %s: %s' % (request_id, exc))
-            return ('pool_empty', None)
-    else:
-        def _reject(store):
-            req = store['requests'].get(request_id)
-            if not req or req.get('status') != 'pending':
-                return ('exists', req)
-            now = utcnow()
-            req['status'] = 'rejected'
-            req['reviewedAt'] = now
-            req['reviewedBy'] = admin_user_id
-            store['drafts'].pop(str((req.get('user') or {}).get('id')), None)
-            return ('rejected', req)
+    return mutate_json(USERS_FILE, default_users(), _do)
 
-        code, request = mutate_json(USERS_FILE, default_users, _reject)
 
-    if code != 'approved' or not request:
-        return code, request
+def assign_voucher(request_id, support_user):
+    """Mark a pending_assignment request as delivered and reserve a voucher.
+    Returns a status string: 'ok' | 'missing' | 'empty' | 'already'."""
+    def _do(data):
+        requests = data.get('requests') or {}
+        req = None
+        for candidate in requests.values():
+            if candidate.get('requestId') == request_id:
+                req = candidate
+                break
+        if req is None:
+            return 'missing'
 
-    user_id = str((request.get('user') or {}).get('id'))
+        if req.get('voucher'):
+            return 'already'
 
-    try:
-        send_message(user_id, build_approved_message(request['packageLabel'], request['voucherPhrase']))
-    except Exception:
-        logger.exception('Failed to send voucher to user %s', user_id)
-
-    if ADMIN_CHAT_ID:
         try:
-            store = read_json(USERS_FILE, default_users())
-            count = sum(1 for r in (store.get('requests') or {}).values()
-                        if r.get('status') == 'approved')
-            workbook_path = build_approved_workbook(store)
-            send_document(ADMIN_CHAT_ID, workbook_path,
-                          caption='Excel updated: %d approved transaction(s) (incl. request %s). Use /export to re-download anytime.'
-                                  % (count, request_id))
-        except Exception:
-            logger.exception('Failed to export/send workbook for request %s', request_id)
+            entry = reserve_voucher(req.get('phrasePool'))
+        except PoolEmptyError:
+            req['status'] = 'pending_assignment'
+            req['updatedAt'] = utcnow()
+            return 'empty'
 
-    return code, request
+        owner_profile = _get_user_profile(data, str(req.get('userId')))
+        entry.update({
+            'ownerId': str(req.get('userId')),
+            'ownerName': ('%s %s' % (owner_profile.get('firstName') or '',
+                                     owner_profile.get('lastName') or '')).strip(),
+            'phone': (req.get('phone') or {}).get('number'),
+            'packageKey': req.get('packageKey'),
+            'packageLabel': req.get('packageLabel'),
+            'assigned': True,
+            'status': 'assigned',
+            'assignedAt': utcnow(),
+            'assignedBy': str(support_user.get('id')),
+            'requestId': req.get('requestId'),
+        })
+        record_voucher_assignment(entry)
+        req['voucher'] = {
+            'phrase': entry.get('phrase'),
+            'extra': entry.get('extra', ''),
+            'assignedAt': entry.get('assignedAt'),
+            'assignedBy': entry.get('assignedBy'),
+            'ownerId': entry.get('ownerId'),
+        }
+        req['status'] = 'delivered'
+        req['updatedAt'] = utcnow()
+        return 'ok'
+
+    return mutate_json(USERS_FILE, default_users(), _do)
+
+
+def send_pending_summary(support_user):
+    """Send the list of approved purchases that still need a voucher."""
+    def _collect(data):
+        pending = []
+        for req in (data.get('requests') or {}).values():
+            if req.get('status') in ('pending_assignment', 'approved'):
+                pending.append(req)
+        return pending
+
+    pending = mutate_json(USERS_FILE, default_users(), _collect)
+    keyboard = {'inline_keyboard': []}
+    for req in pending:
+        keyboard['inline_keyboard'].append([{
+            'text': 'Assign: %s (%s)' % (req.get('requestId'), req.get('packageLabel')),
+            'callback_data': 'assign:%s' % req.get('requestId'),
+        }])
+    if not keyboard['inline_keyboard']:
+        keyboard = None
+    send_message(support_user.get('id'), build_pending_assignment_message(pending), reply_markup=keyboard)
 
 
 # ---------------------------------------------------------------------------
@@ -865,186 +1227,194 @@ def finalize_request(request_id, admin_user_id, approved):
 # ---------------------------------------------------------------------------
 
 
-def handle_message(msg):
-    chat_id = (msg.get('chat') or {}).get('id')
-    user = msg.get('from') or {}
-    user_id = str(user.get('id'))
-    text = str(msg.get('text') or '').strip()
+def handle_message(update):
+    message = update.get('message') or {}
+    chat = message.get('chat') or {}
+    user = message.get('from') or {}
+    chat_id = chat.get('id')
+    text = message.get('text') or ''
 
-    if not text or not chat_id or not user_id:
-        return
+    if not chat_id:
+        return False
 
-    if text == '/start':
-        if not PACKAGES:
-            send_message(chat_id, 'No packages are configured yet. Add them in PACKAGES_JSON first.')
-            return
+    def _record(_data):
+        _store_user_profile(_data, user)
+        return True
+
+    mutate_json(USERS_FILE, default_users(), _record)
+
+    if text == '/export' and is_admin(chat_id):
+        write_exports_and_send(chat_id)
+        return True
+
+    if text == '/pending' and can_assign_vouchers(chat_id):
+        send_pending_summary(user or {'id': chat_id})
+        return True
+
+    if text in ('/start', '/buy'):
         send_message(chat_id, get_start_message(), reply_markup=build_package_keyboard())
-        return
-
-    if text == '/help':
-        send_message(chat_id,
-                     'Available commands:\n'
-                     '/buy - start the package and verification flow\n'
-                     '/myaccess - resend your approved voucher phrase\n'
-                     '/export - (admin) download the full Excel of approved transactions')
-        return
-
-    if text == '/buy':
-        if not ADMIN_CHAT_ID:
-            send_message(chat_id, 'ADMIN_CHAT_ID is missing. Set it before using /buy.')
-            return
-        if not PACKAGES:
-            send_message(chat_id, 'No packages are configured yet. Add them in PACKAGES_JSON first.')
-            return
-
-        def _start(store):
-            store['drafts'][user_id] = {'step': 'package', 'startedAt': utcnow()}
-
-        mutate_json(USERS_FILE, default_users, _start)
-        send_message(chat_id, get_package_selection_message(), reply_markup=build_package_keyboard())
-        return
-
-    if text == '/cancel':
-        def _cancel(store):
-            store['drafts'].pop(user_id, None)
-
-        mutate_json(USERS_FILE, default_users, _cancel)
-        send_message(chat_id, 'Your current submission has been cancelled.')
-        return
+        return True
 
     if text == '/myaccess':
-        voucher = get_voucher_for_user(user_id)
-        if not voucher:
-            send_message(chat_id, 'No approved voucher found for this account yet. Use /buy to submit your payment details.')
-            return
-        send_message(chat_id, build_approved_message(
-            voucher.get('packageLabel') or 'Your package', voucher['phrase']))
-        return
+        voucher = get_voucher_for_user(chat_id)
+        if voucher:
+            status = normalize_voucher_status(voucher)
+            package_label = voucher.get('packageLabel') or ''
+            if status == 'redeemed':
+                send_message(chat_id, 'Your voucher was already redeemed on %s.' % voucher.get('redeemedAt'))
+            else:
+                send_message(chat_id, 'Your voucher for %s:\nPhrase: %s' % (package_label, voucher.get('phrase')))
+        else:
+            send_message(chat_id, 'No voucher found. Buy a package first with /buy.')
+        return True
 
-    if text in ('/export', 'Export Excel'):
-        if not ADMIN_CHAT_ID:
-            send_message(chat_id, 'ADMIN_CHAT_ID is missing. Set it before using /export.')
-            return
-        if user_id != str(ADMIN_CHAT_ID):
-            send_message(chat_id, 'Only the admin can export the Excel file.')
-            return
-        try:
-            store = read_json(USERS_FILE, default_users())
-            count = sum(1 for r in (store.get('requests') or {}).values()
-                        if r.get('status') == 'approved')
-            workbook_path = build_approved_workbook(store)
-            send_document(chat_id, workbook_path,
-                          caption='Full export of %d approved transaction(s).' % count)
-            send_message(chat_id, 'Tap the button below to export the full Excel file anytime.',
-                         reply_markup=build_export_keyboard())
-        except Exception:
-            logger.exception('Failed to export workbook on demand')
-            send_message(chat_id, 'Export failed. Check the error log.')
-        return
+    if not text or text.startswith('/'):
+        return False
 
-    if text.startswith('/'):
-        return
-
-    handle_draft_step(user_id, chat_id, text)
+    draft, message, reply_markup = handle_draft_step(user, text)
+    if message:
+        send_message(chat_id, message, reply_markup=reply_markup)
+    elif draft and draft.get('step') == 'done':
+        draft['step'] = 'submitted'
+        _save_draft(chat_id, draft)
+        submit_request(chat_id, draft)
+    return True
 
 
-def handle_callback(cb):
-    callback_id = cb['id']
-    data = cb.get('data') or ''
-    user = cb.get('from') or {}
-    user_id = str(user.get('id'))
-    message = cb.get('message') or {}
+def handle_contact(update):
+    message = update.get('message') or {}
+    contact = message.get('contact') or {}
     chat_id = (message.get('chat') or {}).get('id')
-    message_id = message.get('message_id')
+    user = message.get('from') or {}
+
+    if not chat_id or not contact:
+        return False
+
+    number = contact.get('phone_number') or ''
+    if not is_plausible_phone(number):
+        send_message(chat_id, 'That phone number looks invalid. Try again.')
+        return False
+
+    draft = _get_draft(chat_id) or _new_draft(chat_id)
+    if draft.get('step') != 'phone':
+        return False
+
+    draft.update({
+        'phone': {'number': number, 'verified': True},
+        'step': 'method',
+        'updatedAt': utcnow(),
+    })
+    _save_draft(chat_id, draft)
+    send_message(chat_id, 'Phone number received. How do you want to pay?',
+                 reply_markup=build_payment_method_keyboard())
+    return True
+
+
+def handle_callback(update):
+    callback = update.get('callback_query') or {}
+    data = callback.get('data') or ''
+    user = callback.get('from') or {}
+    message = callback.get('message') or {}
+    chat_id = (message.get('chat') or {}).get('id')
+    callback_id = callback.get('id')
+
+    if not data or not callback_id:
+        return False
+
+    def _record(_data):
+        _store_user_profile(_data, user)
+        return True
+
+    mutate_json(USERS_FILE, default_users(), _record)
 
     if data.startswith('package:'):
         package_key = data.split(':', 1)[1]
-        pkg = get_package_by_key(package_key)
-        if not pkg:
-            answer_callback_query(callback_id, 'Package not found.')
-            return
-
-        def _select(store):
-            store['drafts'][user_id] = {
-                'step': 'paymentMethod',
-                'packageKey': pkg['key'],
-                'packageLabel': pkg['label'],
-                'priceCents': pkg['priceCents'],
-                'currency': pkg['currency'],
-                'username': user.get('username'),
-                'last_name': user.get('last_name'),
-                'startedAt': utcnow(),
-            }
-
-        mutate_json(USERS_FILE, default_users, _select)
-        answer_callback_query(callback_id, 'Selected %s' % pkg['label'])
-        send_message(user_id,
-                     'Package selected: %s\n'
-                     'Price: %s\n'
-                     '\n'
-                     'Now choose your payment method:'
-                     % (pkg['label'], format_money(pkg['priceCents'], pkg['currency'])),
-                     reply_markup=build_payment_method_keyboard())
-        return
+        package = get_package_by_key(package_key)
+        if not package:
+            answer_callback_query(callback_id, 'Unknown package')
+            return True
+        draft = _get_draft(user.get('id')) or _new_draft(user.get('id'))
+        draft.update({'package': package['key'], 'step': 'phone', 'updatedAt': utcnow()})
+        _save_draft(user.get('id'), draft)
+        edit_message_reply_markup(chat_id, message.get('message_id'))
+        send_message(chat_id,
+                     'Package: %s\nPrice: %s\nShare your phone number with the button below.'
+                     % (package['label'], format_money(package['priceCents'], package['currency'])),
+                     reply_markup=build_phone_share_keyboard())
+        return True
 
     if data.startswith('method:'):
         method_key = data.split(':', 1)[1]
         method = get_payment_method(method_key)
         if not method:
-            answer_callback_query(callback_id, 'Unknown payment method.')
-            return
-
-        def _set_method(store):
-            draft = store['drafts'].get(user_id)
-            if not draft or draft.get('step') != 'paymentMethod':
-                return False
-            draft['paymentMethod'] = method['key']
-            draft['paymentMethodLabel'] = method['label']
-            draft['step'] = 'name'
+            answer_callback_query(callback_id, 'Unknown method')
             return True
+        draft = _get_draft(user.get('id')) or _new_draft(user.get('id'))
+        if draft.get('step') != 'method':
+            return True
+        draft.update({'method': method['key'], 'step': 'name', 'updatedAt': utcnow()})
+        _save_draft(user.get('id'), draft)
+        edit_message_reply_markup(chat_id, message.get('message_id'))
+        send_message(chat_id, 'Great. What is your full name?')
+        return True
 
-        updated = mutate_json(USERS_FILE, default_users, _set_method)
-        if not updated:
-            answer_callback_query(callback_id, 'No active submission. Use /buy to start.')
-            return
-        answer_callback_query(callback_id, 'Selected %s' % method['label'])
-        send_message(user_id, 'Send your full name to continue.')
-        return
+    if data.startswith('approve:') and is_admin(user.get('id')):
+        request_id = data.split(':', 1)[1]
+        req = finalize_request(request_id, 'approved', user)
+        if req:
+            send_message(req.get('userId'), build_approved_pending_voucher_message(req))
+        answer_callback_query(callback_id, 'Approved')
+        return True
 
-    if data.startswith('approve:') or data.startswith('reject:'):
-        action, request_id = data.split(':', 1)
-        if user_id != str(ADMIN_CHAT_ID):
-            answer_callback_query(callback_id, 'You are not allowed to review requests.')
-            return
+    if data.startswith('reject:') and is_admin(user.get('id')):
+        request_id = data.split(':', 1)[1]
+        req = finalize_request(request_id, 'rejected', user)
+        if req:
+            send_message(req.get('userId'), build_rejected_message(req))
+        answer_callback_query(callback_id, 'Rejected')
+        return True
 
-        try:
-            code, _ = finalize_request(request_id, user_id, action == 'approve')
-            if chat_id and message_id:
-                edit_message_reply_markup(chat_id, message_id)
-            if code == 'approved':
-                answer_callback_query(callback_id, 'Request approved.')
-            elif code == 'rejected':
-                answer_callback_query(callback_id, 'Request rejected.')
-            elif code == 'pool_empty':
-                answer_callback_query(callback_id, 'Voucher pool empty for this package.')
-            else:
-                answer_callback_query(callback_id, 'Request not found or already processed.')
-        except Exception:
-            logger.exception('Failed to review request %s', request_id)
-            answer_callback_query(callback_id, 'Failed to process request.')
-        return
+    if data.startswith('assign:') and can_assign_vouchers(user.get('id')):
+        request_id = data.split(':', 1)[1]
+        result = assign_voucher(request_id, user)
+        if result == 'ok':
+            req = get_request_by_id(request_id)
+            if req:
+                send_message(req.get('userId'), build_approved_message(req.get('packageLabel'),
+                                                                     req.get('voucher', {}).get('phrase')))
+            answer_callback_query(callback_id, 'Voucher assigned and sent')
+            send_pending_summary(user)
+        elif result == 'empty':
+            answer_callback_query(callback_id, 'Voucher pool is empty')
+        elif result == 'already':
+            answer_callback_query(callback_id, 'Already assigned')
+        else:
+            answer_callback_query(callback_id, 'Request not found')
+        return True
 
-    answer_callback_query(callback_id, 'Unknown action.')
+    return False
 
 
-def handle_update(update):
-    if 'callback_query' in update:
-        handle_callback(update['callback_query'])
-        return
+def get_request_by_id(request_id):
+    data = read_json(USERS_FILE, default_users())
+    for req in (data.get('requests') or {}).values():
+        if req.get('requestId') == request_id:
+            return req
+    return None
 
-    msg = update.get('message') or update.get('edited_message')
-    if msg:
-        handle_message(msg)
+
+def write_exports_and_send(chat_id):
+    def _collect(data):
+        requests = (data.get('requests') or {}).values()
+        by_package = {}
+        for req in requests:
+            by_package.setdefault(req.get('packageKey'), []).append(req)
+        return by_package
+
+    by_package = mutate_json(USERS_FILE, default_users(), _collect)
+    written = write_exports(by_package)
+    for file_path in written:
+        send_document(chat_id, file_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1052,76 +1422,134 @@ def handle_update(update):
 # ---------------------------------------------------------------------------
 
 app = Flask(__name__)
+
+# PythonAnywhere WSGI entry point imports `application` (see wsgi.py).
 application = app
 
 
 @app.route('/')
 def index():
-    return 'Tinat bot webhook is live. POST Telegram updates to /telegram-webhook.'
+    return jsonify({
+        'service': 'tinat-bot',
+        'status': 'ok',
+        'time': utcnow(),
+        'webhook_path': '/telegram-webhook',
+        'redeem_path': '/api/v1/vouchers/redeem',
+    })
 
 
 @app.route('/health')
 def health():
-    return jsonify({'ok': True})
+    return jsonify({'status': 'ok', 'time': utcnow()})
 
 
 @app.route('/telegram-webhook', methods=['POST'])
 def telegram_webhook():
-    if not request.is_json:
-        return jsonify({'ok': False, 'error': 'expected JSON'}), 400
-
     update = request.get_json(silent=True) or {}
-    if record_update(update.get('update_id')):
-        return jsonify({'ok': True})
+    if not update:
+        return '', 200
+
+    update_id = update.get('update_id')
+    if record_update(update_id):
+        return jsonify({'ok': True, 'duplicate': True})
+
     try:
-        handle_update(update)
+        if handle_callback(update) or handle_message(update) or handle_contact(update):
+            pass
+        return jsonify({'ok': True})
     except Exception:
-        logger.exception('Failed to process update')
-    # Always 200 so Telegram stops retrying; failures are visible in the
-    # PythonAnywhere error log and get retried manually if needed.
-    return jsonify({'ok': True})
-
-
-@app.route('/api/redeem', methods=['POST'])
-def api_redeem():
-    body = request.get_json(silent=True) or {}
-    result = redeem_phrase(body.get('phrase'), body.get('userId'), body.get('deviceId'))
-    if result.get('ok'):
-        return jsonify({
-            'status': 'success',
-            'packageKey': result['packageKey'],
-            'packageLabel': result['packageLabel'],
-        }), 200
-    return jsonify({'status': 'invalid', 'error': result.get('error')}), 400
+        logger.exception('Unhandled error while processing update %s', update_id)
+        return jsonify({'ok': False, 'error': 'internal error'}), 200
 
 
 @app.route('/api/v1/vouchers/redeem', methods=['POST'])
-def api_redeem_v1():
-    """Legacy contract from docs/voucher-redemption-contract.md."""
-    body = request.get_json(silent=True) or {}
-    result = redeem_phrase(body.get('phrase'), body.get('userId'), body.get('deviceId'))
-    if result.get('ok'):
-        return jsonify(result), 200
-    return jsonify(result), 400
+def redeem_voucher_api():
+    """Redeem a voucher owned by the Telegram user in the Mini App.
 
-
-def register_webhook(webhook_url):
-    """Set the Telegram webhook. Call from a PythonAnywhere Bash console:
-    python -c "from flask_app import register_webhook; register_webhook('https://<user>.pythonanywhere.com/telegram-webhook')"
+    Body: { "initData": "...", "voucherPhrase": "..." }
+    The initData hash is verified against the bot token before the voucher is
+    atomically marked REDEEMED. A matching entitlement is then recorded.
     """
+    if request.content_type not in ('application/json', 'text/json'):
+        return jsonify({'error': 'Content-Type must be application/json'}), 415
+
+    body = request.get_json(silent=True) or {}
+    init_data = body.get('initData')
+    phrase = str(body.get('voucherPhrase') or '').strip()
+
+    if not phrase:
+        return jsonify({'error': 'voucherPhrase is required'}), 400
+
+    user = verify_init_data(init_data)
+    if user is None:
+        return jsonify({'error': 'Invalid or expired initData'}), 401
+
+    owner_id = str(user.get('id'))
+    if not rate_limit_redeem(owner_id):
+        return jsonify({'error': 'Too many attempts. Try again later.'}), 429
+
+    result = redeem_code(owner_id, phrase)
+    if isinstance(result, dict) and 'error' in result:
+        code = 404 if result['error'] in ('No matching voucher found', 'Voucher is not assigned to you yet') else 409
+        return jsonify(result), code
+
+    return jsonify({'ok': True, 'entitlement': result}), 200
+
+
+@app.route('/api/v1/vouchers/status', methods=['POST'])
+def voucher_status_api():
+    """Check whether a voucher is still usable, without consuming it.
+
+    Body: { "initData": "...", "voucherPhrase": "..." }
+    """
+    if request.content_type not in ('application/json', 'text/json'):
+        return jsonify({'error': 'Content-Type must be application/json'}), 415
+
+    body = request.get_json(silent=True) or {}
+    init_data = body.get('initData')
+    phrase = str(body.get('voucherPhrase') or '').strip()
+
+    if not phrase:
+        return jsonify({'error': 'voucherPhrase is required'}), 400
+
+    user = verify_init_data(init_data)
+    if user is None:
+        return jsonify({'error': 'Invalid or expired initData'}), 401
+
+    voucher = find_voucher(str(user.get('id')), phrase)
+    if voucher is None:
+        return jsonify({'error': 'No matching voucher found'}), 404
+
+    return jsonify({'ok': True, 'status': normalize_voucher_status(voucher)}), 200
+
+
+def register_webhook():
+    """Register the Telegram webhook for this PythonAnywhere host."""
     if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError('TELEGRAM_BOT_TOKEN is not set')
-    response = requests.post(
-        'https://api.telegram.org/bot%s/setWebhook' % TELEGRAM_BOT_TOKEN,
-        json={'url': webhook_url, 'allowed_updates': ['message', 'callback_query', 'edited_message']},
-        timeout=30,
-    )
-    payload = response.json()
-    logger.info('setWebhook -> %s', payload)
-    if not payload.get('ok'):
-        raise RuntimeError('setWebhook failed: %s' % payload)
-    return payload
+        logger.error('Cannot register webhook: missing TELEGRAM_BOT_TOKEN')
+        return None
+
+    if 'PA_WEBSITE_URL' in os.environ:
+        base_url = os.environ['PA_WEBSITE_URL'].rstrip('/')
+    else:
+        username = os.environ.get('PA_USERNAME', '').strip()
+        base_url = ('https://%s.pythonanywhere.com' % username) if username else 'http://127.0.0.1:5000'
+
+    webhook_url = base_url + '/telegram-webhook'
+    allowed = json.dumps(['message', 'callback_query', 'channel_post'])
+    payload = {
+        'url': webhook_url,
+        'allowed_updates': allowed,
+        'drop_pending_updates': False,
+    }
+    result = tg_call('setWebhook', data=payload)
+    if result and result.get('ok'):
+        logger.info('Webhook registered at %s', webhook_url)
+    else:
+        logger.error('Failed to register webhook: %s', result)
+    return result
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host='127.0.0.1', port=int(os.environ.get('PORT', '5000')))
+
