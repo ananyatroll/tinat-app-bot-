@@ -1754,6 +1754,31 @@ def handle_message(update):
             send_message(chat_id, 'No voucher found. Buy a package first with /buy.')
         return True
 
+    if text == '/diag':
+        def _collect(data):
+            requests = data.get('requests') or {}
+            statuses = [req.get('status') for req in requests.values()]
+            latest = [req for req in requests.values()][-3:]
+            return len(requests), statuses, latest
+
+        total, statuses, latest = mutate_json(USERS_FILE, default_users(), _collect)
+        lines = [
+            'Diag',
+            'your chat id: %s' % chat_id,
+            'ADMIN_CHAT_ID=%s' % (ADMIN_CHAT_ID or '(not set)'),
+            'SUPPORT_CHAT_ID=%s' % (SUPPORT_CHAT_ID or '(not set)'),
+            'is_admin=%s' % is_admin(chat_id),
+            'DATA_DIR=%s' % DATA_DIR,
+            'requests_total=%d' % total,
+            'request_statuses=%s' % (', '.join(statuses) or '(none)'),
+        ]
+        for req in latest:
+            lines.append('  %s | %s | %s' % (
+                req.get('requestId'), req.get('status'),
+                req.get('packageLabel') or req.get('package', '')))
+        send_message(chat_id, '\n'.join(lines))
+        return True
+
     if not text or text.startswith('/'):
         return False
 
