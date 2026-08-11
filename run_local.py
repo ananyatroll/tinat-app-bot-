@@ -25,7 +25,6 @@ import flask_app
 POLL_TIMEOUT_SECONDS = 50
 ALLOWED_UPDATES = ('message', 'callback_query')
 RETRY_DELAY_SECONDS = 5
-LOCK_STALE_SECONDS = POLL_TIMEOUT_SECONDS * 2 + 20
 
 
 def _lock_path():
@@ -35,10 +34,12 @@ def _lock_path():
 def acquire_poll_lock():
     """Ensure only one getUpdates poller runs for this bot.
 
-    Telegram itself rejects a second poller with error 409, but refusing at
-    startup gives a clear message instead of a silent retry loop. The lock
-    file records a heartbeat (its mtime), so the lock of a crashed process
-    goes stale after a couple of poll timeouts and is taken over.
+    Telegram itself rejects a second poller with error 409, so this lock only
+    needs to keep a single instance alive on the shared volume. A leftover
+    lock from a previous container is always taken over immediately: on
+    Railway every container runs as pid 1, so the recorded owner pid is never
+    meaningful across restarts, and waiting for a 'stale' window just turns a
+    restart into a crash loop.
     """
     path = _lock_path()
     try:
@@ -49,20 +50,15 @@ def acquire_poll_lock():
     except FileExistsError:
         pass
 
+    try:
+        owner = open(path, encoding='utf-8').read().strip()
+    except OSError:
+        owner = 'unknown'
     age = time.time() - os.path.getmtime(path)
-    if age < LOCK_STALE_SECONDS:
-        try:
-            owner = open(path, encoding='utf-8').read().strip()
-        except OSError:
-            owner = 'unknown'
-        flask_app.logger.error(
-            'Another poller is already running (lock %s, pid %s, last '
-            'heartbeat %ds ago). Refusing to start a second instance. '
-            'Remove the lock file if that process is gone.',
-            path, owner, int(age))
-        raise SystemExit(2)
-
-    flask_app.logger.warning('Stale poll lock found (%ds old); taking over.', int(age))
+    flask_app.logger.warning(
+        'Leftover poll lock found (pid %s, %ds old) from a previous run; '
+        'taking it over. If another instance of this bot is still polling, '
+        'Telegram will reject its polls with 409.', owner, int(age))
     with open(path, 'w', encoding='utf-8') as fh:
         fh.write(str(os.getpid()))
     return path
