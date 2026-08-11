@@ -1214,8 +1214,31 @@ EXPORT_HEADERS = [
     'Request ID', 'Package', 'User', 'Telegram Username', 'User ID', 'Phone',
     'Payment Method', 'Transaction ID', 'Transaction Link', 'Voucher Phrase',
     'Status', 'Approved At', 'Voucher Assigned At', 'Voucher Owner ID',
-    'Owner Phone', 'Owner Name',
+    'Owner Phone', 'Owner Name', 'Price (ETB)',
 ]
+
+
+def _price_etb(package_key):
+    """Unit price in ETB for a package key, or None when unknown."""
+    pkg = get_package_by_key(package_key) if package_key else None
+    if pkg is None:
+        return None
+    try:
+        return int(pkg.get('priceCents') or 0) / 100.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _sale_count(requests, approved_map=None):
+    """Count paid requests (have a voucher or are approved/delivered)."""
+    approved_map = approved_map or {}
+    count = 0
+    for req in requests:
+        if approved_map.get(req.get('requestId')) is not None:
+            count += 1
+        elif req.get('status') in ('approved', 'delivered'):
+            count += 1
+    return count
 
 
 def write_exports(requests_by_package):
@@ -1277,10 +1300,29 @@ def write_excel_requests(file_path, requests, approved_map=None):
             (voucher or {}).get('ownerId') if voucher else '',
             (voucher or {}).get('phone') if voucher else '',
             (voucher or {}).get('ownerName') if voucher else '',
+            _price_etb(req.get('packageKey')) or '',
         ])
 
     _autofit_excel(ws)
+    _write_total_sales_sheet(wb, requests, approved_map)
     wb.save(file_path)
+
+
+def _write_total_sales_sheet(wb, requests, approved_map=None):
+    """Add a 'Total Sales' tab that sums the price of each paid row."""
+    package_key = next((r.get('packageKey') for r in requests if r.get('packageKey')), None)
+    pkg = get_package_by_key(package_key) if package_key else None
+    label = (pkg['label'] if pkg else package_key or '') or ''
+    price = _price_etb(package_key)
+    sales = _sale_count(requests, approved_map)
+
+    ws = wb.create_sheet('Total Sales')
+    _write_excel_headers(ws, ['Metric', 'Value'])
+    ws.append(['Package', label])
+    ws.append(['Unit price (ETB)', price if price is not None else ''])
+    ws.append(['Sales count', sales])
+    ws.append(['Total sales (ETB)', round(price * sales, 2) if price is not None else ''])
+    _autofit_excel(ws)
 
 
 def write_excel_totals(file_path, requests_by_package):
@@ -1298,6 +1340,21 @@ def write_excel_totals(file_path, requests_by_package):
         ws.append([label, len(requests), approved, pending, rejected])
 
     _autofit_excel(ws)
+
+    ts = wb.create_sheet('Total Sales')
+    _write_excel_headers(ts, ['Package', 'Unit Price (ETB)', 'Sales Count', 'Total Sales (ETB)'])
+    grand_total = 0.0
+    for package_key, requests in requests_by_package.items():
+        pkg = get_package_by_key(package_key)
+        label = pkg['label'] if pkg else package_key
+        price = _price_etb(package_key)
+        sales = _sale_count(requests)
+        row_total = round((price or 0.0) * sales, 2) if price is not None else ''
+        grand_total += (price or 0.0) * sales if price is not None else 0.0
+        ts.append([label, price if price is not None else '', sales, row_total])
+    ts.append(['GRAND TOTAL', '', '', round(grand_total, 2)])
+    _autofit_excel(ts)
+
     wb.save(file_path)
 
 
