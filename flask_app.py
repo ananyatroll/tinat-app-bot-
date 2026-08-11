@@ -1463,19 +1463,35 @@ def _save_draft(user_id, draft):
     return mutate_json(USERS_FILE, default_users(), _write)
 
 
+def _latest_request_for_user(requests, user_id):
+    """Return the most recently created request of a user, or None."""
+    matches = [req for req in requests.values() if str(req.get('userId')) == str(user_id)]
+    if not matches:
+        return None
+    matches.sort(key=lambda req: str(req.get('createdAt') or ''), reverse=True)
+    return matches[0]
+
+
 def _submit(data, user_id, draft):
     """Create (or look up) the request for a user from their finished draft.
 
-    Returns the request. An already-submitted request is returned unchanged
-    except when it was rejected: a rejected request is marked 'superseded' and
-    a fresh one is created so the user can try again."""
+    Returns the request. An active request (pending / approved / waiting for
+    voucher) is returned unchanged, and a delivered request for the same
+    package blocks a repeat purchase. A delivered request for a different
+    package allows a new purchase. A rejected request is marked 'superseded'
+    and a fresh one is created so the user can try again. Requests are stored
+    keyed by requestId so a user can hold more than one."""
     requests = data.setdefault('requests', {})
-    existing = requests.get(str(user_id))
+    existing = _latest_request_for_user(requests, user_id)
     if existing:
-        if existing.get('status') != 'rejected':
+        status = existing.get('status')
+        if status in ('pending', 'approved', 'pending_assignment'):
             return existing
-        existing['status'] = 'superseded'
-        existing['updatedAt'] = utcnow()
+        if status == 'rejected':
+            existing['status'] = 'superseded'
+            existing['updatedAt'] = utcnow()
+        elif status == 'delivered' and existing.get('packageKey') == draft.get('package'):
+            return existing
 
     profile = _get_user_profile(data, user_id)
     package = get_package_by_key(draft.get('package')) or DEFAULT_PACKAGES[0]
@@ -1490,7 +1506,7 @@ def _submit(data, user_id, draft):
         'status': 'pending',
         'updatedAt': utcnow(),
     })
-    requests[str(user_id)] = request
+    requests[str(request['requestId'])] = request
     return request
 
 
