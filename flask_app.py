@@ -1589,6 +1589,7 @@ def submit_request(user_id, draft):
     status = request.get('status')
 
     if status == 'pending':
+        logger.info('New request %s (user %s) persisted; notifying admin', request.get('requestId'), user_id)
         send_message(user_id, build_pending_message(request))
         notify_admin(request)
     elif status in ('approved', 'pending_assignment', 'delivered'):
@@ -1759,9 +1760,14 @@ def handle_message(update):
             requests = data.get('requests') or {}
             statuses = [req.get('status') for req in requests.values()]
             latest = [req for req in requests.values()][-3:]
-            return len(requests), statuses, latest
+            drafts = [
+                (uid, d.get('step'), d.get('package'), d.get('method'),
+                 bool(d.get('link')), bool(d.get('txid')), d.get('name'))
+                for uid, d in (data.get('drafts') or {}).items()
+            ]
+            return len(requests), statuses, latest, drafts
 
-        total, statuses, latest = mutate_json(USERS_FILE, default_users(), _collect)
+        total, statuses, latest, drafts = mutate_json(USERS_FILE, default_users(), _collect)
         lines = [
             'Diag',
             'your chat id: %s' % chat_id,
@@ -1776,6 +1782,12 @@ def handle_message(update):
             lines.append('  %s | %s | %s' % (
                 req.get('requestId'), req.get('status'),
                 req.get('packageLabel') or req.get('package', '')))
+        lines.append('drafts:')
+        for uid, step, pkg, method, has_link, has_txid, name in drafts:
+            lines.append('  %s | step=%s | pkg=%s | method=%s | link=%s | txid=%s | name=%s' % (
+                uid, step, pkg, method, has_link, has_txid, name or ''))
+        if not drafts:
+            lines.append('  (none)')
         send_message(chat_id, '\n'.join(lines))
         return True
 
@@ -1783,6 +1795,7 @@ def handle_message(update):
         return False
 
     draft, message, reply_markup = handle_draft_step(user, text)
+    logger.info('Flow user=%s step=%s', user.get('id'), draft.get('step'))
     if message:
         send_message(chat_id, message, reply_markup=reply_markup)
     elif draft and draft.get('step') == 'done':
