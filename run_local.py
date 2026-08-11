@@ -97,6 +97,27 @@ def clear_webhook():
         flask_app.logger.warning('deleteWebhook did not report ok; continuing anyway.')
 
 
+def verify_bot_token():
+    """Confirm the bot token is set and identify which bot is being polled.
+
+    Returns True when the token works, otherwise logs a clear error. Without a
+    working BOT_TOKEN the poller silently does nothing, so this makes the
+    failure obvious in the logs.
+    """
+    result = flask_app.tg_call('getMe')
+    if not result or not result.get('ok'):
+        description = (result or {}).get('description') or ''
+        flask_app.logger.error(
+            'Telegram getMe failed. BOT_TOKEN is missing or invalid '
+            '(set BOT_TOKEN on Railway/Variables and redeploy): %s', description)
+        return False
+    info = result.get('result') or {}
+    flask_app.logger.info(
+        'Connected to Telegram as @%s (id %s). Polling will deliver updates '
+        'to this bot.', info.get('username'), info.get('id'))
+    return True
+
+
 def log_storage_paths():
     flask_app.logger.info('DATA_DIR: %s', flask_app.DATA_DIR)
     for label in ('USERS_FILE', 'VOUCHERS_FILE', 'ENTITLEMENTS_FILE',
@@ -180,6 +201,8 @@ def main():
     clear_webhook()
 
     try:
+        if not verify_bot_token():
+            raise RuntimeError('BOT_TOKEN check failed; refusing to poll.')
         poll_forever()
     except KeyboardInterrupt:
         flask_app.logger.info('Stopped by user.')
