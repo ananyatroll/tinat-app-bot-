@@ -192,7 +192,7 @@ function getIdFormatHint(paymentMethodKey) {
     return 'starts with FT, e.g. FT26222QKMBG';
   }
   if (paymentMethodKey === 'telebirr') {
-    return 'letters and digits, e.g. DGJ22CMPJM';
+    return 'letters and digits, e.g. DG*********, DH********';
   }
   return 'your transaction ID';
 }

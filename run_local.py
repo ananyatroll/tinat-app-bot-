@@ -16,6 +16,7 @@ Usage:
 Stops with Ctrl+C.
 """
 
+import os
 import threading
 import time
 
@@ -24,6 +25,83 @@ import flask_app
 POLL_TIMEOUT_SECONDS = 50
 ALLOWED_UPDATES = ('message', 'callback_query')
 RETRY_DELAY_SECONDS = 5
+LOCK_STALE_SECONDS = POLL_TIMEOUT_SECONDS * 2 + 20
+
+
+def _lock_path():
+    return os.path.join(flask_app.DATA_DIR, 'run_local.lock')
+
+
+def acquire_poll_lock():
+    """Ensure only one getUpdates poller runs for this bot.
+
+    Telegram itself rejects a second poller with error 409, but refusing at
+    startup gives a clear message instead of a silent retry loop. The lock
+    file records a heartbeat (its mtime), so the lock of a crashed process
+    goes stale after a couple of poll timeouts and is taken over.
+    """
+    path = _lock_path()
+    try:
+        with open(path, 'x', encoding='utf-8') as fh:
+            fh.write(str(os.getpid()))
+        flask_app.logger.info('Acquired single-instance poll lock: %s', path)
+        return path
+    except FileExistsError:
+        pass
+
+    age = time.time() - os.path.getmtime(path)
+    if age < LOCK_STALE_SECONDS:
+        try:
+            owner = open(path, encoding='utf-8').read().strip()
+        except OSError:
+            owner = 'unknown'
+        flask_app.logger.error(
+            'Another poller is already running (lock %s, pid %s, last '
+            'heartbeat %ds ago). Refusing to start a second instance. '
+            'Remove the lock file if that process is gone.',
+            path, owner, int(age))
+        raise SystemExit(2)
+
+    flask_app.logger.warning('Stale poll lock found (%ds old); taking over.', int(age))
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write(str(os.getpid()))
+    return path
+
+
+def release_poll_lock(path):
+    try:
+        with open(path, encoding='utf-8') as fh:
+            owner = fh.read().strip()
+    except OSError:
+        return
+    if owner == str(os.getpid()):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def touch_poll_lock():
+    try:
+        os.utime(_lock_path())
+    except OSError:
+        pass
+
+
+def clear_webhook():
+    flask_app.logger.info('Clearing any Telegram webhook before polling ...')
+    result = flask_app.tg_call('deleteWebhook', data={'drop_pending_updates': True})
+    if result and result.get('ok'):
+        flask_app.logger.info('Webhook cleared (drop_pending_updates=True).')
+    else:
+        flask_app.logger.warning('deleteWebhook did not report ok; continuing anyway.')
+
+
+def log_storage_paths():
+    flask_app.logger.info('DATA_DIR: %s', flask_app.DATA_DIR)
+    for label in ('USERS_FILE', 'VOUCHERS_FILE', 'ENTITLEMENTS_FILE',
+                  'PROCESSED_UPDATES_FILE', 'AUTH_TOKENS_FILE', 'ACCESS_TOKENS_FILE'):
+        flask_app.logger.info('Storage %s: %s', label, getattr(flask_app, label))
 
 
 def get_updates(offset, timeout=POLL_TIMEOUT_SECONDS):
@@ -55,6 +133,7 @@ def poll_forever():
     offset = 0
     flask_app.logger.info('Starting long polling (getUpdates mode) ...')
     while True:
+        touch_poll_lock()
         try:
             result = get_updates(offset)
         except Exception:
@@ -83,6 +162,9 @@ def poll_forever():
 
 
 def main():
+    lock_path = acquire_poll_lock()
+    log_storage_paths()
+
     host = flask_app.os.environ.get('HOST', '0.0.0.0')
     port = int(flask_app.os.environ.get('PORT', '5000'))
 
@@ -95,10 +177,14 @@ def main():
     server_thread.start()
     flask_app.logger.info('Local server (redeem API / health): http://%s:%s', host, port)
 
+    clear_webhook()
+
     try:
         poll_forever()
     except KeyboardInterrupt:
         flask_app.logger.info('Stopped by user.')
+    finally:
+        release_poll_lock(lock_path)
 
 
 if __name__ == '__main__':

@@ -89,11 +89,11 @@ Example `PACKAGES_JSON`:
 
 ```json
 [
-	{"key":"euee-preo","label":"EUEE Preo","priceCents":25000,"currency":"ETB","phrasePool":"euee-preo"},
-	{"key":"freshman","label":"Freshman","priceCents":25000,"currency":"ETB","phrasePool":"freshman"},
-	{"key":"uat","label":"UAT","priceCents":25000,"currency":"ETB","phrasePool":"uat"},
-	{"key":"university-department","label":"University Department","priceCents":25000,"currency":"ETB","phrasePool":"university-department"},
-	{"key":"exit-exam","label":"Exit Exam","priceCents":25000,"currency":"ETB","phrasePool":"exit-exam"}
+	{"key":"euee-preo","label":"EUEE Preo","priceCents":30000,"currency":"ETB","phrasePool":"euee-preo"},
+	{"key":"freshman","label":"Freshman","priceCents":30000,"currency":"ETB","phrasePool":"freshman"},
+	{"key":"uat","label":"UAT","priceCents":30000,"currency":"ETB","phrasePool":"uat"},
+	{"key":"university-department","label":"University Department","priceCents":30000,"currency":"ETB","phrasePool":"university-department"},
+	{"key":"exit-exam","label":"Exit Exam","priceCents":30000,"currency":"ETB","phrasePool":"exit-exam"}
 ]
 ```
 

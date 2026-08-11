@@ -115,16 +115,74 @@ if not ADMIN_CHAT_ID:
     logger.warning('ADMIN_CHAT_ID is not set. The approval flow will not work.')
 
 
+def _prepare_data_dir():
+    """Validate the persistent data directory at startup.
+
+    Logs the resolved DATA_DIR and its writability, and refuses to start
+    when an explicitly-configured directory outside the project (for example
+    Railway's volume at /data) is missing or not writable. It never
+    auto-creates a mount point: doing so would silently persist to ephemeral
+    storage and lose data on the next redeploy. The project-local default
+    (BASE_DIR/data) is created lazily for development and tests.
+
+    This is intentionally strict when DATA_DIR comes from the environment:
+    a missing /data means the volume is not actually mounted, and the app
+    must surface that instead of quietly running on throwaway storage.
+    """
+    inside_project = os.path.normpath(DATA_DIR).startswith(
+        os.path.normpath(BASE_DIR) + os.sep)
+
+    if os.path.isdir(DATA_DIR):
+        probe = os.path.join(DATA_DIR, '.write-test')
+        try:
+            with open(probe, 'w', encoding='utf-8') as fh:
+                fh.write('ok')
+            try:
+                os.remove(probe)
+            except OSError:
+                pass
+        except OSError as exc:
+            raise RuntimeError(
+                'DATA_DIR %r is configured but not writable: %s' % (DATA_DIR, exc))
+        logger.info('DATA_DIR: %s (writable)', DATA_DIR)
+        return
+
+    if not inside_project:
+        raise RuntimeError(
+            'DATA_DIR %r is configured but the directory does not exist. '
+            'On Railway this means the persistent volume is not mounted at '
+            'that path. The app will NOT fall back to ephemeral storage; '
+            'mount the volume (or fix DATA_DIR) and restart.' % DATA_DIR)
+
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError('Cannot create DATA_DIR %r: %s' % (DATA_DIR, exc))
+    logger.info('DATA_DIR: %s (created)', DATA_DIR)
+
+
+_prepare_data_dir()
+
+for _storage_label, _storage_path in (
+        ('users', USERS_FILE),
+        ('vouchers', VOUCHERS_FILE),
+        ('entitlements', ENTITLEMENTS_FILE),
+        ('processed_updates', PROCESSED_UPDATES_FILE),
+        ('auth_tokens', AUTH_TOKENS_FILE),
+        ('access_tokens', ACCESS_TOKENS_FILE)):
+    logger.info('Storage file %s: %s', _storage_label, _storage_path)
+
+
 # ---------------------------------------------------------------------------
 # Packages
 # ---------------------------------------------------------------------------
 
 DEFAULT_PACKAGES = [
-    {'key': 'euee-preo', 'label': 'EUEE Preo', 'priceCents': 25000, 'currency': 'ETB', 'phrasePool': 'euee-preo'},
-    {'key': 'freshman', 'label': 'Freshman', 'priceCents': 25000, 'currency': 'ETB', 'phrasePool': 'freshman'},
-    {'key': 'uat', 'label': 'UAT', 'priceCents': 25000, 'currency': 'ETB', 'phrasePool': 'uat'},
-    {'key': 'university-department', 'label': 'University Department', 'priceCents': 25000, 'currency': 'ETB', 'phrasePool': 'university-department'},
-    {'key': 'exit-exam', 'label': 'Exit Exam', 'priceCents': 25000, 'currency': 'ETB', 'phrasePool': 'exit-exam'},
+    {'key': 'euee-preo', 'label': 'EUEE Preo', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'euee-preo'},
+    {'key': 'freshman', 'label': 'Freshman', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'freshman'},
+    {'key': 'uat', 'label': 'UAT', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'uat'},
+    {'key': 'university-department', 'label': 'University Department', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'university-department'},
+    {'key': 'exit-exam', 'label': 'Exit Exam', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'exit-exam'},
 ]
 
 
@@ -246,7 +304,7 @@ def id_format_hint(method_key):
     if method_key == 'cbe':
         return 'starts with FT, e.g. FT26222QKMBG'
     if method_key == 'telebirr':
-        return 'letters and digits, e.g. DGJ22CMPJM'
+        return 'letters and digits, e.g. DG*********, DH********'
     return 'your transaction ID'
 
 
