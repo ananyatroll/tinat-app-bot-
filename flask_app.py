@@ -6,7 +6,7 @@ Telegram is configured in webhook mode and POSTs every update to
 https://<username>.pythonanywhere.com/telegram-webhook
 
 Feature parity with the current Node.js bot:
-  - /start package chooser (EUEE Preo, Freshman, UAT, University Department, Exit Exam)
+   - /start package chooser (EUEE Prep, Freshman, UAT, University Department, Exit Exam)
   - state machine: package -> phone (verified via Telegram contact share) ->
     payment method (CBE/Telebirr) -> name -> transaction link -> transaction ID
   - admin approval with Approve / Reject inline buttons
@@ -178,7 +178,7 @@ for _storage_label, _storage_path in (
 # ---------------------------------------------------------------------------
 
 DEFAULT_PACKAGES = [
-    {'key': 'euee-preo', 'label': 'EUEE Preo', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'euee-preo'},
+    {'key': 'euee-prep', 'label': 'EUEE Prep', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'euee-prep'},
     {'key': 'freshman', 'label': 'Freshman', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'freshman'},
     {'key': 'uat', 'label': 'UAT', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'uat'},
     {'key': 'university-department', 'label': 'University Department', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'university-department'},

@@ -70,11 +70,11 @@ Response on success:
 ```json
 {
   "ok": true,
-  "packageKey": "euee-preo",
-  "packageLabel": "EUEE Preo",
+  "packageKey": "euee-prep",
+  "packageLabel": "EUEE Prep",
   "redeemedAt": "2026-08-09T12:00:00.000Z",
   "access": {
-    "packageKey": "euee-preo",
+    "packageKey": "euee-prep",
     "enabled": true
   }
 }

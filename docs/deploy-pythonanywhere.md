@@ -32,7 +32,7 @@ structure. On the **Files** tab create/upload:
 ├── scripts/
 │   └── backup.py
 ├── phrases/                  # one .txt per pool, one phrase per line
-│   ├── euee-preo.txt
+│   ├── euee-prep.txt
 │   ├── freshman.txt
 │   ├── uat.txt
 │   ├── university-department.txt
@@ -87,7 +87,7 @@ Optional:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PACKAGES_JSON` | the 5 default packages (EUEE Preo, Freshman, UAT, University Department, Exit Exam) | JSON array to override the package list |
+| `PACKAGES_JSON` | the 5 default packages (EUEE Prep, Freshman, UAT, University Department, Exit Exam) | JSON array to override the package list |
 | `PHRASES_DIR` | `./phrases` | Phrase pool folder |
 | `DATA_DIR` | `./data` | JSON stores |
 | `EXPORTS_DIR` | `./exports` | Excel output |

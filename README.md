@@ -89,7 +89,7 @@ Example `PACKAGES_JSON`:
 
 ```json
 [
-	{"key":"euee-preo","label":"EUEE Preo","priceCents":30000,"currency":"ETB","phrasePool":"euee-preo"},
+	{"key":"euee-prep","label":"EUEE Prep","priceCents":30000,"currency":"ETB","phrasePool":"euee-prep"},
 	{"key":"freshman","label":"Freshman","priceCents":30000,"currency":"ETB","phrasePool":"freshman"},
 	{"key":"uat","label":"UAT","priceCents":30000,"currency":"ETB","phrasePool":"uat"},
 	{"key":"university-department","label":"University Department","priceCents":30000,"currency":"ETB","phrasePool":"university-department"},
