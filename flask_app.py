@@ -1966,7 +1966,7 @@ def auth_login_api():
     Success: {ok, userId, authToken, expiresAt}
     Errors:  {ok: false, error: UNAUTHORIZED|BAD_REQUEST}
     """
-    if request.content_type not in ('application/json', 'text/json'):
+    if request.mimetype not in ('application/json', 'text/json'):
         return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
 
     body = request.get_json(silent=True) or {}
@@ -1995,7 +1995,7 @@ def redeem_voucher_api():
     Success:  {ok, packageKey, packageLabel, redeemedAt, access}
     Errors:   {ok: false, error: INVALID_CODE|ALREADY_REDEEMED|...}
     """
-    if request.content_type not in ('application/json', 'text/json'):
+    if request.mimetype not in ('application/json', 'text/json'):
         return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
 
     body = request.get_json(silent=True) or {}
@@ -2037,7 +2037,7 @@ def voucher_status_api():
     Success: {ok: true, status: ASSIGNED|REDEEMED|..., packageKey, packageLabel}
     Errors:  {ok: false, error: INVALID_CODE|NOT_OWNER|...}
     """
-    if request.content_type not in ('application/json', 'text/json'):
+    if request.mimetype not in ('application/json', 'text/json'):
         return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
 
     body = request.get_json(silent=True) or {}
@@ -2134,7 +2134,7 @@ def android_activate_api():
     Success:  {success, accessToken, package: {id, name}}
     Errors:   {success: false, error: INVALID_CODE|PHONE_MISMATCH|...}
     """
-    if request.content_type not in ('application/json', 'text/json'):
+    if request.mimetype not in ('application/json', 'text/json'):
         return jsonify({'success': False, 'error': 'BAD_REQUEST'}), 400
 
     body = request.get_json(silent=True) or {}
