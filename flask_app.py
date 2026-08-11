@@ -33,7 +33,7 @@ import re
 import secrets
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
 
 import requests
@@ -95,6 +95,13 @@ UPDATE_DEDUPE_TTL_SECONDS = 60 * 60 * 24
 REDEEM_RATE_LIMIT_MAX = int(os.environ.get('REDEEM_RATE_LIMIT_MAX', '5'))
 REDEEM_RATE_LIMIT_WINDOW_MS = int(os.environ.get('REDEEM_RATE_LIMIT_WINDOW_MS', str(10 * 60 * 1000)))
 INIT_DATA_MAX_AGE_SECONDS = int(os.environ.get('INIT_DATA_MAX_AGE_SECONDS', str(24 * 60 * 60)))
+AUTH_TOKEN_TTL_SECONDS = int(os.environ.get('AUTH_TOKEN_TTL_SECONDS', str(24 * 60 * 60)))
+AUTH_TOKENS_FILE = _abs_path(os.environ.get('AUTH_TOKENS_FILE'), os.path.join(DATA_DIR, 'auth_tokens.json'))
+
+ACCESS_TOKENS_FILE = _abs_path(os.environ.get('ACCESS_TOKENS_FILE'), os.path.join(DATA_DIR, 'access_tokens.json'))
+ACCESS_TOKEN_TTL_SECONDS = int(os.environ.get('ACCESS_TOKEN_TTL_SECONDS', str(365 * 24 * 60 * 60)))
+ANDROID_RATE_LIMIT_MAX = int(os.environ.get('ANDROID_RATE_LIMIT_MAX', str(REDEEM_RATE_LIMIT_MAX)))
+ANDROID_RATE_LIMIT_WINDOW_MS = int(os.environ.get('ANDROID_RATE_LIMIT_WINDOW_MS', str(REDEEM_RATE_LIMIT_WINDOW_MS)))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -270,8 +277,8 @@ def build_phone_share_keyboard():
 # ---------------------------------------------------------------------------
 
 
-def utcnow():
-    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+def utcnow(offset_seconds=0):
+    return (datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)).isoformat().replace('+00:00', 'Z')
 
 
 def random_id(length):
@@ -284,16 +291,42 @@ def is_plausible_phone(value):
     return 9 <= len(digits) <= 15
 
 
-def _acquire_lock(fh):
+def normalize_phone(value):
+    """Canonical phone form: digits only (no +, spaces, dashes)."""
+    return re.sub(r'\D', '', str(value or ''))
+
+
+def mask_phone(value):
+    """Mask a phone for logs, keeping only the last 4 digits."""
+    digits = normalize_phone(value)
+    if len(digits) <= 4:
+        return '***'
+    return '*' * (len(digits) - 4) + digits[-4:]
+
+
+def _acquire_lock(fh, timeout=30):
     if os.name == 'nt':
         try:
             import msvcrt
-            fh.seek(0)
-            if not fh.read(1):
-                fh.write(b'\0')
-                fh.flush()
-            fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+            deadline = time.time() + timeout
+            while True:
+                try:
+                    fh.seek(0)
+                    if not fh.read(1):
+                        fh.write(b'\0')
+                        fh.flush()
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:
+                    # msvcrt.locking is non-blocking on Windows: both locking
+                    # AND reading the locked byte from another handle raise
+                    # PermissionError while another thread holds the lock.
+                    # Poll until the region is free so concurrent writers
+                    # serialize the same as flock on Linux.
+                    if time.time() > deadline:
+                        raise
+                    time.sleep(0.05)
         except ImportError:
             pass
     else:
@@ -371,7 +404,17 @@ def mutate_json(path, default, fn):
         tmp_path = path + '.tmp'
         with open(tmp_path, 'w', encoding='utf-8') as fh:
             json.dump(data, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, path)
+        # os.replace can transiently fail on Windows when the destination is
+        # still open (AV or OneDrive sync); retry briefly instead of crashing.
+        deadline = time.time() + 10
+        while True:
+            try:
+                os.replace(tmp_path, path)
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.05)
         return result
 
 
@@ -763,6 +806,179 @@ def verify_init_data(init_data):
     return user if isinstance(user, dict) else None
 
 
+def default_auth_tokens():
+    return {'tokens': {}}
+
+
+def verify_login_widget(data):
+    """Validate a Telegram Login Widget / native-login payload.
+
+    The native Android "Login with Telegram" SDK (telegram-login-android)
+    returns a signed set of fields: id, first_name, last_name, username,
+    photo_url, auth_date and hash. The hash is an HMAC-SHA256 of the
+    sorted key=value pairs using the SHA-256 of the bot token as the key
+    (the same scheme as the web Login Widget). Returns the user dict or
+    None when the data is not authentic or is stale.
+    """
+    if not data or not TELEGRAM_BOT_TOKEN:
+        return None
+
+    try:
+        payload = dict(data)
+    except (TypeError, ValueError):
+        return None
+
+    received_hash = payload.pop('hash', None)
+    if not received_hash:
+        return None
+
+    auth_date = payload.get('auth_date')
+    try:
+        if abs(int(auth_date) - time.time()) > INIT_DATA_MAX_AGE_SECONDS:
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    data_check_string = '\n'.join(
+        '%s=%s' % (k, payload[k]) for k in sorted(payload)
+    )
+    secret_key = hashlib.sha256(TELEGRAM_BOT_TOKEN.encode('utf-8')).digest()
+    expected_hash = hmac.new(secret_key, data_check_string.encode('utf-8'), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_hash, received_hash):
+        return None
+
+    user_id = payload.get('id')
+    if user_id is None:
+        return None
+
+    return {
+        'id': str(user_id),
+        'username': str(payload.get('username') or ''),
+        'firstName': str(payload.get('first_name') or ''),
+        'lastName': str(payload.get('last_name') or ''),
+    }
+
+
+def issue_auth_token(user_id):
+    """Create a short-lived token bound to a Telegram user id."""
+    token = secrets.token_urlsafe(32)
+
+    def _store(data):
+        data.setdefault('tokens', {})[token] = {
+            'userId': str(user_id),
+            'expiresAt': utcnow(offset_seconds=AUTH_TOKEN_TTL_SECONDS),
+        }
+        return token
+
+    mutate_json(AUTH_TOKENS_FILE, default_auth_tokens(), _store)
+    return token
+
+
+def resolve_auth_token(token):
+    """Map an auth token back to its Telegram user id, or None if unknown
+    or expired."""
+    if not token:
+        return None
+    token = str(token)
+
+    def _read(data):
+        entry = (data.get('tokens') or {}).get(token)
+        if not entry:
+            return None
+        try:
+            expires_at = datetime.fromisoformat(str(entry.get('expiresAt')).replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if expires_at < datetime.now(timezone.utc):
+            return None
+        return str(entry.get('userId'))
+
+    return mutate_json(AUTH_TOKENS_FILE, default_auth_tokens(), _read)
+
+
+def default_access_tokens():
+    return {'tokens': {}}
+
+
+def issue_access_token(entitlement):
+    """Issue a long-lived app access token bound to an entitlement."""
+    token = secrets.token_urlsafe(32)
+    now = utcnow()
+
+    def _store(data):
+        data.setdefault('tokens', {})[token] = {
+            'entitlementId': entitlement.get('entitlementId'),
+            'phone': normalize_phone(entitlement.get('phone')),
+            'userId': str(entitlement.get('ownerId') or ''),
+            'packageKey': entitlement.get('packageKey'),
+            'packageLabel': entitlement.get('packageLabel'),
+            'issuedAt': now,
+            'expiresAt': utcnow(offset_seconds=ACCESS_TOKEN_TTL_SECONDS),
+            'revoked': False,
+        }
+        return token
+
+    mutate_json(ACCESS_TOKENS_FILE, default_access_tokens(), _store)
+    return token
+
+
+def resolve_access_token(token):
+    """Return (status, entry) for an access token.
+
+    status is 'valid' | 'unknown' | 'revoked' | 'expired'."""
+    token = str(token or '').strip()
+    if not token:
+        return 'unknown', None
+
+    def _read(data):
+        entry = (data.get('tokens') or {}).get(token)
+        if not entry:
+            return 'unknown', None
+        if entry.get('revoked'):
+            return 'revoked', entry
+        try:
+            expires_at = datetime.fromisoformat(str(entry.get('expiresAt')).replace('Z', '+00:00'))
+        except ValueError:
+            return 'expired', entry
+        if expires_at < datetime.now(timezone.utc):
+            return 'expired', entry
+        return 'valid', entry
+
+    return mutate_json(ACCESS_TOKENS_FILE, default_access_tokens(), _read)
+
+
+def revoke_access_token(token):
+    token = str(token or '').strip()
+    if not token:
+        return False
+
+    def _revoke(data):
+        entry = (data.get('tokens') or {}).get(token)
+        if not entry:
+            return False
+        entry['revoked'] = True
+        entry['revokedAt'] = utcnow()
+        return True
+
+    return mutate_json(ACCESS_TOKENS_FILE, default_access_tokens(), _revoke)
+
+
+def revoke_entitlement(entitlement_id):
+    entitlement_id = str(entitlement_id or '').strip()
+    if not entitlement_id:
+        return False
+
+    def _revoke(data):
+        entry = (data.get('entitlements') or {}).get(entitlement_id)
+        if not entry:
+            return False
+        entry['revoked'] = True
+        entry['revokedAt'] = utcnow()
+        return True
+
+    return mutate_json(ENTITLEMENTS_FILE, default_entitlements(), _revoke)
+
+
 RATE_LIMIT = {}
 
 
@@ -838,6 +1054,97 @@ def redeem_code(owner_id, phrase, device_id=''):
 
     mutate_json(ENTITLEMENTS_FILE, default_entitlements(), _record)
     return entitlement
+
+
+def activate_voucher(phone, phrase):
+    """Atomically activate a voucher by verified phone + redeem code.
+
+    This is the Android-app activation path: identity is the phone number
+    captured by Telegram's Share Contact (phoneVerified), not a Telegram ID.
+    Every validation (voucher exists, assigned, not redeemed, not revoked,
+    owner phone matches, phone was Telegram-verified, payment approved,
+    package valid) runs inside the single serialized write lock on
+    VOUCHERS_FILE, so two simultaneous activations of the same code can never
+    both succeed.
+
+    Returns the entitlement record, or a dict error."""
+    phone_digits = normalize_phone(phone)
+    phrase = str(phrase or '').strip()
+    if not phone_digits or not is_plausible_phone(phone_digits):
+        return {'error': 'Invalid phone number'}
+    if not phrase:
+        return {'error': 'Missing redeem code'}
+
+    def _activate(data):
+        issued = data.setdefault('issued', {})
+        entry = issued.get(phrase)
+        if entry is None:
+            return {'error': 'No matching voucher found'}
+
+        status = normalize_voucher_status(entry)
+        if status == 'redeemed':
+            return {'error': 'Voucher already redeemed'}
+        if entry.get('revoked'):
+            return {'error': 'Voucher was revoked'}
+        if status != 'assigned':
+            return {'error': 'Voucher is not assigned to you yet'}
+
+        request = None
+        if entry.get('requestId'):
+            users = read_json(USERS_FILE, default_users())
+            for candidate in (users.get('requests') or {}).values():
+                if candidate.get('requestId') == entry.get('requestId'):
+                    request = candidate
+                    break
+
+        stored_phone = normalize_phone(entry.get('phone'))
+        if not stored_phone or stored_phone != phone_digits:
+            return {'error': 'Phone does not match the voucher owner'}
+
+        request_phone = (request or {}).get('phone') or {}
+        phone_verified = bool(request_phone.get('verified'))
+        if not phone_verified:
+            phone_verified = bool(entry.get('phoneVerified'))
+        if not phone_verified:
+            return {'error': 'Phone number was not verified through Telegram'}
+
+        if request is None or request.get('status') not in ('approved', 'delivered'):
+            return {'error': 'Payment was not approved'}
+
+        pkg = get_package_by_key(entry.get('packageKey'))
+        if pkg is None:
+            return {'error': 'Package is invalid'}
+
+        entry['redeemed'] = True
+        entry['redeemedAt'] = utcnow()
+        entry['status'] = 'redeemed'
+        entry['redeemedByPhone'] = phone_digits
+        entry['activatedBy'] = 'android'
+
+        entitlement = {
+            'entitlementId': random_id(16),
+            'ownerId': str(entry.get('ownerId') or (request or {}).get('userId') or ''),
+            'phone': phone_digits,
+            'phrase': entry.get('phrase'),
+            'packageKey': entry.get('packageKey'),
+            'packageLabel': entry.get('packageLabel'),
+            'assignedAt': entry.get('assignedAt'),
+            'redeemedAt': entry['redeemedAt'],
+            'activatedBy': 'android',
+            'requestId': entry.get('requestId'),
+        }
+        return entitlement
+
+    result = mutate_json(VOUCHERS_FILE, default_vouchers(), _activate)
+    if isinstance(result, dict) and 'error' in result:
+        return result
+
+    def _record(data):
+        data.setdefault('entitlements', {})[result['entitlementId']] = result
+        return True
+
+    mutate_json(ENTITLEMENTS_FILE, default_entitlements(), _record)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1225,6 +1532,7 @@ def assign_voucher(request_id, support_user):
             'ownerName': ('%s %s' % (owner_profile.get('firstName') or '',
                                      owner_profile.get('lastName') or '')).strip(),
             'phone': (req.get('phone') or {}).get('number'),
+            'phoneVerified': bool((req.get('phone') or {}).get('verified')),
             'packageKey': req.get('packageKey'),
             'packageLabel': req.get('packageLabel'),
             'assigned': True,
@@ -1296,6 +1604,22 @@ def handle_message(update):
 
     if text == '/pending' and can_assign_vouchers(chat_id):
         send_pending_summary(user or {'id': chat_id})
+        return True
+
+    if text.startswith('/revokeaccess ') and is_admin(chat_id):
+        token = text.split(' ', 1)[1].strip()
+        if revoke_access_token(token):
+            send_message(chat_id, 'Access token revoked. The app will no longer open the package.')
+        else:
+            send_message(chat_id, 'Token not found or already revoked.')
+        return True
+
+    if text.startswith('/revokeentitlement ') and is_admin(chat_id):
+        entitlement_id = text.split(' ', 1)[1].strip()
+        if revoke_entitlement(entitlement_id):
+            send_message(chat_id, 'Entitlement revoked. Associated access tokens are no longer valid.')
+        else:
+            send_message(chat_id, 'Entitlement not found.')
         return True
 
     if text in ('/start', '/buy'):
@@ -1555,6 +1879,52 @@ def _redeem_error(message):
     return mapping.get(message, 'BAD_REQUEST')
 
 
+def _authenticate(body):
+    """Resolve the authenticated Telegram user id from a request body.
+
+    Accepts either a Mini App initData (verified against the bot token) or a
+    previously-issued authToken (from /api/v1/auth/login). Returns the user id
+    string, or None when unauthenticated.
+    """
+    auth_token = str(body.get('authToken') or '').strip()
+    if auth_token:
+        return resolve_auth_token(auth_token)
+
+    user = verify_init_data(body.get('initData'))
+    if user is None:
+        return None
+    return str(user.get('id'))
+
+
+@app.route('/api/v1/auth/login', methods=['POST'])
+def auth_login_api():
+    """Log in a Telegram user from the native Android SDK payload.
+
+    Body (the fields the telegram-login-android SDK hands back):
+        {id, first_name, last_name, username, auth_date, hash}
+    The hash is verified against the bot token, then a short-lived authToken
+    is returned that the app passes to /redeem or /status.
+
+    Success: {ok, userId, authToken, expiresAt}
+    Errors:  {ok: false, error: UNAUTHORIZED|BAD_REQUEST}
+    """
+    if request.content_type not in ('application/json', 'text/json'):
+        return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
+
+    body = request.get_json(silent=True) or {}
+    user = verify_login_widget(body)
+    if user is None:
+        return jsonify({'ok': False, 'error': 'UNAUTHORIZED'}), 401
+
+    token = issue_auth_token(user['id'])
+    return jsonify({
+        'ok': True,
+        'userId': user['id'],
+        'authToken': token,
+        'expiresAt': utcnow(),
+    }), 200
+
+
 @app.route('/api/v1/vouchers/redeem', methods=['POST'])
 def redeem_voucher_api():
     """Redeem a voucher owned by the Telegram user in the Mini App.
@@ -1571,18 +1941,16 @@ def redeem_voucher_api():
         return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
 
     body = request.get_json(silent=True) or {}
-    init_data = body.get('initData')
     phrase = str(body.get('code') or body.get('phrase') or body.get('voucherPhrase') or '').strip()
     device_id = str(body.get('deviceId') or '')
 
     if not phrase:
         return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
 
-    user = verify_init_data(init_data)
-    if user is None:
+    owner_id = _authenticate(body)
+    if owner_id is None:
         return jsonify({'ok': False, 'error': 'UNAUTHORIZED'}), 401
 
-    owner_id = str(user.get('id'))
     if not rate_limit_redeem(owner_id):
         return jsonify({'ok': False, 'error': 'RATE_LIMITED'}), 429
 
@@ -1615,14 +1983,13 @@ def voucher_status_api():
         return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
 
     body = request.get_json(silent=True) or {}
-    init_data = body.get('initData')
     phrase = str(body.get('code') or body.get('phrase') or body.get('voucherPhrase') or '').strip()
 
     if not phrase:
         return jsonify({'ok': False, 'error': 'BAD_REQUEST'}), 400
 
-    user = verify_init_data(init_data)
-    if user is None:
+    owner_id = _authenticate(body)
+    if owner_id is None:
         return jsonify({'ok': False, 'error': 'UNAUTHORIZED'}), 401
 
     data = read_json(VOUCHERS_FILE, default_vouchers())
@@ -1639,7 +2006,7 @@ def voucher_status_api():
     status = normalize_voucher_status(entry)
     if status == 'redeemed':
         return jsonify({'ok': False, 'error': 'ALREADY_REDEEMED'}), 400
-    if str(entry.get('ownerId')) != str(user.get('id')):
+    if str(entry.get('ownerId')) != str(owner_id):
         return jsonify({'ok': False, 'error': 'NOT_OWNER'}), 400
     if status != 'assigned':
         return jsonify({'ok': False, 'error': 'NOT_ASSIGNED'}), 400
@@ -1649,6 +2016,145 @@ def voucher_status_api():
         'status': 'ASSIGNED',
         'packageKey': entry.get('packageKey'),
         'packageLabel': entry.get('packageLabel'),
+    }), 200
+
+
+ANDROID_ACTIVATE_ERRORS = {
+    'Invalid phone number': 'INVALID_PHONE',
+    'Missing redeem code': 'BAD_REQUEST',
+    'No matching voucher found': 'INVALID_CODE',
+    'Voucher already redeemed': 'ALREADY_REDEEMED',
+    'Voucher was revoked': 'VOUCHER_REVOKED',
+    'Voucher is not assigned to you yet': 'NOT_ASSIGNED',
+    'Phone does not match the voucher owner': 'PHONE_MISMATCH',
+    'Phone number was not verified through Telegram': 'PHONE_NOT_VERIFIED',
+    'Payment was not approved': 'PAYMENT_NOT_APPROVED',
+    'Package is invalid': 'PACKAGE_INVALID',
+}
+
+ANDROID_ERROR_HTTP = {
+    'BAD_REQUEST': 400,
+    'INVALID_PHONE': 400,
+    'INVALID_CODE': 400,
+    'ALREADY_REDEEMED': 400,
+    'VOUCHER_REVOKED': 400,
+    'NOT_ASSIGNED': 400,
+    'PHONE_MISMATCH': 400,
+    'PHONE_NOT_VERIFIED': 400,
+    'PAYMENT_NOT_APPROVED': 400,
+    'PACKAGE_INVALID': 400,
+    'RATE_LIMITED': 429,
+    'UNAUTHORIZED': 401,
+    'TOKEN_EXPIRED': 401,
+    'TOKEN_REVOKED': 401,
+    'ENTITLEMENT_NOT_FOUND': 404,
+}
+
+
+def _android_activate_error(message):
+    return ANDROID_ACTIVATE_ERRORS.get(message, 'BAD_REQUEST')
+
+
+def _client_ip():
+    forwarded = request.headers.get('X-Forwarded-For', '')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.remote_addr or 'unknown'
+
+
+@app.route('/api/v1/android/activate', methods=['POST'])
+def android_activate_api():
+    """Activate a purchased package from the standalone Android app.
+
+    Body: { "phone": "+2519XXXXXXXX", "code": "BIO-82KF-91XP" }
+    The backend verifies everything against its own records (voucher state,
+    owner phone, Telegram phone verification, payment approval, package) and
+    never trusts app-supplied identity. On success the voucher is marked
+    REDEEMED atomically, an entitlement is created, and an app access token
+    is returned.
+
+    Success:  {success, accessToken, package: {id, name}}
+    Errors:   {success: false, error: INVALID_CODE|PHONE_MISMATCH|...}
+    """
+    if request.content_type not in ('application/json', 'text/json'):
+        return jsonify({'success': False, 'error': 'BAD_REQUEST'}), 400
+
+    body = request.get_json(silent=True) or {}
+    phone = normalize_phone(body.get('phone'))
+    phrase = str(body.get('code') or '').strip()
+    ip = _client_ip()
+
+    if not phone or not phrase:
+        return jsonify({'success': False, 'error': 'BAD_REQUEST'}), 400
+    if not is_plausible_phone(phone):
+        return jsonify({'success': False, 'error': 'INVALID_PHONE'}), 400
+
+    if not rate_limit_redeem('android-phone:' + phone, ANDROID_RATE_LIMIT_MAX, ANDROID_RATE_LIMIT_WINDOW_MS):
+        return jsonify({'success': False, 'error': 'RATE_LIMITED'}), 429
+    if not rate_limit_redeem('android-code:' + phrase, ANDROID_RATE_LIMIT_MAX, ANDROID_RATE_LIMIT_WINDOW_MS):
+        return jsonify({'success': False, 'error': 'RATE_LIMITED'}), 429
+    if not rate_limit_redeem('android-ip:' + ip, ANDROID_RATE_LIMIT_MAX, ANDROID_RATE_LIMIT_WINDOW_MS):
+        return jsonify({'success': False, 'error': 'RATE_LIMITED'}), 429
+
+    logger.info('Android activation attempt phone=%s code_len=%d ip=%s', mask_phone(phone), len(phrase), ip)
+
+    result = activate_voucher(phone, phrase)
+    if isinstance(result, dict) and 'error' in result:
+        error = _android_activate_error(result['error'])
+        logger.info('Android activation failed: %s', error)
+        return jsonify({'success': False, 'error': error}), ANDROID_ERROR_HTTP[error]
+
+    token = issue_access_token(result)
+    return jsonify({
+        'success': True,
+        'accessToken': token,
+        'package': {
+            'id': result.get('packageKey'),
+            'name': result.get('packageLabel'),
+        },
+    }), 200
+
+
+@app.route('/api/v1/android/entitlement', methods=['GET'])
+def android_entitlement_api():
+    """Look up the package authorized by an app access token.
+
+    Authorization: Bearer <accessToken>
+    Success: {success, package: {id, name}, entitlement: {...}}
+    Errors:  {success: false, error: UNAUTHORIZED|TOKEN_EXPIRED|TOKEN_REVOKED|
+              ENTITLEMENT_NOT_FOUND}
+    """
+    auth_header = request.headers.get('Authorization', '')
+    scheme, _, token = auth_header.partition(' ')
+    if scheme.lower() != 'bearer' or not token.strip():
+        return jsonify({'success': False, 'error': 'UNAUTHORIZED'}), 401
+
+    status, entry = resolve_access_token(token.strip())
+    if status == 'unknown':
+        return jsonify({'success': False, 'error': 'UNAUTHORIZED'}), 401
+    if status == 'expired':
+        return jsonify({'success': False, 'error': 'TOKEN_EXPIRED'}), 401
+    if status == 'revoked':
+        return jsonify({'success': False, 'error': 'TOKEN_REVOKED'}), 401
+
+    data = read_json(ENTITLEMENTS_FILE, default_entitlements())
+    entitlement = (data.get('entitlements') or {}).get(str(entry.get('entitlementId')))
+    if entitlement is None or entitlement.get('revoked'):
+        error = 'ENTITLEMENT_NOT_FOUND' if entitlement is None else 'TOKEN_REVOKED'
+        return jsonify({'success': False, 'error': error}), ANDROID_ERROR_HTTP[error]
+
+    return jsonify({
+        'success': True,
+        'package': {
+            'id': entitlement.get('packageKey'),
+            'name': entitlement.get('packageLabel'),
+        },
+        'entitlement': {
+            'entitlementId': entitlement.get('entitlementId'),
+            'packageKey': entitlement.get('packageKey'),
+            'packageLabel': entitlement.get('packageLabel'),
+            'activatedAt': entitlement.get('redeemedAt'),
+        },
     }), 200
 
 
