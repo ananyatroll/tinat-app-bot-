@@ -214,21 +214,11 @@ function buildUniversityDeptKeyboard(year) {
 
 function buildCocKeyboard() {
   const depts = [
-    ['📊 Accounting & Finance COC', 'coc_accounting_finance'],
-    ['📈 Economics COC', 'coc_economics'],
-    ['👔 Management COC', 'coc_management'],
-    ['📢 Marketing Management COC', 'coc_marketing_management'],
-    ['📦 LSCM COC', 'coc_lscm'],
-    ['💼 BAIS COC', 'coc_bais'],
-    ['🏛 PADM COC', 'coc_padm'],
-    ['💻 Computer Science COC', 'coc_computer_science'],
-    ['💻 Software Engineering COC', 'coc_software_engineering'],
-    ['ℹ️ Information Sciences COC', 'coc_information_sciences'],
-    ['⚡ Electrical Engineering COC', 'coc_electrical_engineering'],
-    ['⚙️ Mechanical Engineering COC', 'coc_mechanical_engineering'],
-    ['🧠 Psychology COC', 'coc_psychology'],
-    ['🌐 PSIR COC', 'coc_psir'],
-    ['⚖️ Ethiopian Law COC', 'coc_ethiopian_law']
+    ['🩺 Medical COC Exam', 'coc_medical'],
+    ['💻 Computer Science COC Exam', 'coc_computer_science'],
+    ['ℹ️ Information Systems & Science COC', 'coc_information_sciences'],
+    ['🏗 Pre-Engineering COC Exam', 'coc_engineering'],
+    ['⚖️ Law COC Exam', 'coc_law']
   ];
   const rows = depts.map(([label, key]) => [{ text: `${label} — 300 ETB`, callback_data: `package:${key}` }]);
   rows.push([{ text: '🔙 Back to Categories', callback_data: 'cat:main' }]);
