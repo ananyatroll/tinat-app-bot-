@@ -2739,8 +2739,8 @@ def handle_callback(update):
             if message_id:
                 edit_message_text(chat_id, message_id, '🏛 *University Department*\nSelect your Academic Year:', parse_mode='Markdown', reply_markup=build_university_year_keyboard())
             return True
-        if package_key == 'coc' or package_key == 'exit-exam':
-            answer_callback_query(callback_id, 'COC / Exit Exam')
+        if package_key == 'coc':
+            answer_callback_query(callback_id, 'COC Exam Preparation')
             if message_id:
                 edit_message_text(chat_id, message_id, '📋 *COC Exam Preparation*\nSelect your exam field:', parse_mode='Markdown', reply_markup=build_coc_keyboard())
             return True

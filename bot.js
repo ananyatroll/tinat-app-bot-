@@ -1056,8 +1056,8 @@ bot.action(/^package:(.+)$/, async (ctx) => {
     await ctx.editMessageText('🏛 *University Department*\nSelect your Academic Year:', { parse_mode: 'Markdown', ...buildUniversityYearKeyboard() });
     return;
   }
-  if (packageKey === 'coc' || packageKey === 'exit-exam') {
-    await ctx.answerCbQuery('COC / Exit Exam');
+  if (packageKey === 'coc') {
+    await ctx.answerCbQuery('COC Exam Preparation');
     await ctx.editMessageText('📋 *COC Exam Preparation*\nSelect your exam field:', { parse_mode: 'Markdown', ...buildCocKeyboard() });
     return;
   }
