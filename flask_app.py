@@ -546,6 +546,11 @@ def answer_callback_query(callback_query_id, text=None):
     return tg_call('answerCallbackQuery', json=params)
 
 
+def get_chat_member(chat_id, user_id):
+    params = {'chat_id': chat_id, 'user_id': user_id}
+    return tg_call('getChatMember', json=params)
+
+
 def edit_message_reply_markup(chat_id, message_id, reply_markup=None):
     params = {
         'chat_id': chat_id,
@@ -1282,6 +1287,21 @@ def build_approved_pending_voucher_message(request):
 def build_rejected_message(request):
     user_id = request.get('userId')
     return get_msg(user_id, 'rejected_msg', request.get('packageLabel'), request.get('requestId'))
+
+def build_approved_channel_lock_message(package_label, request_id, user_id=None):
+    text = (
+        "🎉 *Payment Approved!*\n\n"
+        "Your payment for *%s* has been verified!\n\n"
+        "📢 *Final Step*: Join our official Telegram channel *@temhiroapp_official* to claim your secret voucher phrase."
+        % package_label
+    )
+    keyboard = {
+        'inline_keyboard': [
+            [{'text': '📢 1. Join @temhiroapp_official', 'url': 'https://t.me/temhiroapp_official'}],
+            [{'text': '✅ 2. Check Channel & Claim Voucher', 'callback_data': 'claim_voucher:%s' % request_id}],
+        ]
+    }
+    return text, keyboard
 
 def build_approved_message(package_label, voucher_phrase, user_id=None, phone_number=None):
     text = get_msg(user_id, 'approved_msg', package_label, phone_number or 'N/A', voucher_phrase)
@@ -2839,15 +2859,49 @@ def handle_callback(update):
         if result in ('ok', 'already'):
             req = get_request_by_id(request_id)
             if req:
-                user_phone = (req.get('phone') or {}).get('number') or ''
-                txt, kb = build_approved_message(req.get('packageLabel'), req.get('voucher', {}).get('phrase'), user_id=req.get('userId'), phone_number=user_phone)
+                txt, kb = build_approved_channel_lock_message(req.get('packageLabel'), request_id, user_id=req.get('userId'))
                 send_message(req.get('userId'), txt, parse_mode='Markdown', reply_markup=kb)
-            answer_callback_query(callback_id, 'Approved and voucher sent')
+            answer_callback_query(callback_id, 'Approved! Telegram channel lock sent to user.')
         elif result == 'empty':
             send_message(req.get('userId'), build_approved_pending_voucher_message(req))
             answer_callback_query(callback_id, 'Approved, but voucher pool is empty')
         else:
             answer_callback_query(callback_id, 'Request not found')
+        return True
+
+    if data.startswith('claim_voucher:'):
+        request_id = data.split(':', 1)[1]
+        req = get_request_by_id(request_id)
+        if not req:
+            answer_callback_query(callback_id, 'Request not found')
+            return True
+
+        target_user_id = str(req.get('userId'))
+        current_user_id = str(user.get('id'))
+        if target_user_id != current_user_id and not is_admin(user.get('id')):
+            answer_callback_query(callback_id, 'Unauthorized')
+            return True
+
+        # Perform Telegram channel membership check
+        channel_name = os.environ.get('TELEGRAM_CHANNEL', '@temhiroapp_official')
+        res = get_chat_member(channel_name, current_user_id)
+        is_member = False
+        if res and res.get('ok'):
+            status = ((res.get('result') or {}).get('status') or '').lower()
+            if status in ('creator', 'administrator', 'member'):
+                is_member = True
+
+        if is_member or is_admin(user.get('id')):
+            user_phone = (req.get('phone') or {}).get('number') or ''
+            voucher_phrase = (req.get('voucher') or {}).get('phrase') or ''
+            txt, kb = build_approved_message(req.get('packageLabel'), voucher_phrase, user_id=current_user_id, phone_number=user_phone)
+            if message_id:
+                edit_message_text(chat_id, message_id, txt, reply_markup=kb, parse_mode='Markdown')
+            else:
+                send_message(chat_id, txt, reply_markup=kb, parse_mode='Markdown')
+            answer_callback_query(callback_id, 'Membership verified! Voucher claimed.')
+        else:
+            answer_callback_query(callback_id, '⚠️ Please join @temhiroapp_official first, then tap Check Channel & Claim Voucher again!', show_alert=True)
         return True
 
     if data.startswith('reject:') and is_admin(user.get('id')):
