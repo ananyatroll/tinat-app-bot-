@@ -217,7 +217,12 @@ function buildCocKeyboard() {
 }
 
 function buildPackageKeyboard(packages) {
-  return buildCategoryKeyboard();
+  return {
+    inline_keyboard: packages.map((pkg) => ([{
+      text: `${pkg.label} - ${formatMoney(pkg.priceCents, pkg.currency)}`,
+      callback_data: `package:${pkg.key}`
+    }]))
+  };
 }
 
 const PAYMENT_METHODS = [
@@ -1055,6 +1060,23 @@ bot.action(/^univ_dept:(.+):y(.+)$/, async (ctx) => {
 
 bot.action(/^package:(.+)$/, async (ctx) => {
   const packageKey = ctx.match[1];
+
+  if (packageKey === 'freshman') {
+    await ctx.answerCbQuery('Freshman');
+    await ctx.editMessageText('🎓 *Freshman Year 1*\nSelect your stream:', { parse_mode: 'Markdown', ...buildFreshmanStreamKeyboard() });
+    return;
+  }
+  if (packageKey === 'university-department') {
+    await ctx.answerCbQuery('University Department');
+    await ctx.editMessageText('🏛 *University Department*\nSelect your Academic Year:', { parse_mode: 'Markdown', ...buildUniversityYearKeyboard() });
+    return;
+  }
+  if (packageKey === 'exit-exam') {
+    await ctx.answerCbQuery('Exit / COC Exam');
+    await ctx.editMessageText('📋 *COC Exam Preparation*\nSelect your exam field:', { parse_mode: 'Markdown', ...buildCocKeyboard() });
+    return;
+  }
+
   let pkg = getPackageByKey(packageKey);
   if (!pkg) {
     // Generate dynamic info for semester/full year/COC packages

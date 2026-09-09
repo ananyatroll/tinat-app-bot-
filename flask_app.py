@@ -1171,7 +1171,11 @@ def build_coc_keyboard():
     return {'inline_keyboard': rows}
 
 def build_package_keyboard():
-    return build_category_keyboard()
+    rows = [[
+        {'text': '%s - %s' % (pkg['label'], format_money(pkg['priceCents'], pkg['currency'])),
+         'callback_data': 'package:%s' % pkg['key']}
+    ] for pkg in load_packages()]
+    return {'inline_keyboard': rows}
 
 def build_phone_share_keyboard(user_id=None):
     btn_text = get_msg(user_id, 'share_phone_btn') if user_id else '📱 Share Phone Number'
@@ -2741,6 +2745,22 @@ def handle_callback(update):
 
     if data.startswith('package:'):
         package_key = data.split(':', 1)[1]
+        if package_key == 'freshman':
+            answer_callback_query(callback_id, 'Freshman')
+            if message_id:
+                edit_message_text(chat_id, message_id, '🎓 *Freshman Year 1*\nSelect your stream:', parse_mode='Markdown', reply_markup=build_freshman_stream_keyboard())
+            return True
+        if package_key == 'university-department':
+            answer_callback_query(callback_id, 'University Department')
+            if message_id:
+                edit_message_text(chat_id, message_id, '🏛 *University Department*\nSelect your Academic Year:', parse_mode='Markdown', reply_markup=build_university_year_keyboard())
+            return True
+        if package_key == 'exit-exam':
+            answer_callback_query(callback_id, 'Exit / COC Exam')
+            if message_id:
+                edit_message_text(chat_id, message_id, '📋 *COC Exam Preparation*\nSelect your exam field:', parse_mode='Markdown', reply_markup=build_coc_keyboard())
+            return True
+
         pcfg = get_product_config(package_key)
         if pcfg:
             package = {'key': pcfg['id'], 'label': pcfg['label'], 'priceCents': pcfg['priceCents'], 'currency': pcfg.get('currency', 'ETB')}
