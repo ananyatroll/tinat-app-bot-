@@ -182,7 +182,7 @@ DEFAULT_PACKAGES = [
     {'key': 'freshman', 'label': 'Freshman', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'freshman'},
     {'key': 'uat', 'label': 'UAT', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'uat'},
     {'key': 'university-department', 'label': 'University Department', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'university-department'},
-    {'key': 'coc', 'label': '📋 COC Exam Preparation', 'priceCents': 40000, 'currency': 'ETB', 'phrasePool': 'exit-exam'},
+    {'key': 'coc', 'label': '📋 COC Exam Preparation', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'exit-exam'},
     {'key': 'exit-exam', 'label': 'Exit Exam', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'exit-exam'},
 ]
 
@@ -1147,14 +1147,21 @@ def build_university_year_keyboard():
 
 def build_university_dept_keyboard(year):
     departments = [
-        ('💻 Computer Science', 'computer_science'),
-        ('⚡ Electrical Engineering', 'electrical_engineering'),
-        ('🏗 Civil Engineering', 'civil_engineering'),
-        ('⚙️ Mechanical Engineering', 'mechanical_engineering'),
         ('📊 Accounting & Finance', 'accounting_finance'),
-        ('💼 Business Administration', 'business_admin'),
-        ('🩺 Medicine', 'medicine'),
-        ('⚖️ Law', 'law')
+        ('📈 Economics', 'economics'),
+        ('👔 Management', 'management'),
+        ('📢 Marketing Management', 'marketing_management'),
+        ('📦 LSCM (Logistics & Supply Chain)', 'lscm'),
+        ('💼 BAIS (Business Admin & Info Sys)', 'bais'),
+        ('🏛 PADM (Public Admin & Dev Mgt)', 'padm'),
+        ('💻 Computer Science', 'computer_science'),
+        ('💻 Software Engineering', 'software_engineering'),
+        ('ℹ️ Information Sciences', 'information_sciences'),
+        ('⚡ Electrical Engineering', 'electrical_engineering'),
+        ('⚙️ Mechanical Engineering', 'mechanical_engineering'),
+        ('🧠 Psychology', 'psychology'),
+        ('🌐 PSIR (Political Sci & Int Rel)', 'psir'),
+        ('⚖️ Ethiopian Law', 'ethiopian_law'),
     ]
     rows = []
     for label, dept_key in departments:
@@ -1163,12 +1170,25 @@ def build_university_dept_keyboard(year):
     return {'inline_keyboard': rows}
 
 def build_coc_keyboard():
-    rows = [
-        [{'text': '🏥 Medical COC Exam — 400 ETB', 'callback_data': 'package:coc_medical'}],
-        [{'text': '⚖️ Law COC Exam — 400 ETB', 'callback_data': 'package:coc_law'}],
-        [{'text': '🏗️ Engineering COC Exam — 400 ETB', 'callback_data': 'package:coc_engineering'}],
-        [{'text': '🔙 Back to Categories', 'callback_data': 'cat:main'}]
+    departments = [
+        ('📊 Accounting & Finance COC', 'coc_accounting_finance'),
+        ('📈 Economics COC', 'coc_economics'),
+        ('👔 Management COC', 'coc_management'),
+        ('📢 Marketing Management COC', 'coc_marketing_management'),
+        ('📦 LSCM COC', 'coc_lscm'),
+        ('💼 BAIS COC', 'coc_bais'),
+        ('🏛 PADM COC', 'coc_padm'),
+        ('💻 Computer Science COC', 'coc_computer_science'),
+        ('💻 Software Engineering COC', 'coc_software_engineering'),
+        ('ℹ️ Information Sciences COC', 'coc_information_sciences'),
+        ('⚡ Electrical Engineering COC', 'coc_electrical_engineering'),
+        ('⚙️ Mechanical Engineering COC', 'coc_mechanical_engineering'),
+        ('🧠 Psychology COC', 'coc_psychology'),
+        ('🌐 PSIR COC', 'coc_psir'),
+        ('⚖️ Ethiopian Law COC', 'coc_ethiopian_law'),
     ]
+    rows = [[{'text': '%s — 300 ETB' % label, 'callback_data': 'package:%s' % key}] for label, key in departments]
+    rows.append([{'text': '🔙 Back to Categories', 'callback_data': 'cat:main'}])
     return {'inline_keyboard': rows}
 
 def build_package_keyboard():
