@@ -554,6 +554,19 @@ def edit_message_reply_markup(chat_id, message_id, reply_markup=None):
     return tg_call('editMessageReplyMarkup', json=params)
 
 
+def edit_message_text(chat_id, message_id, text, reply_markup=None, parse_mode=None):
+    params = {
+        'chat_id': chat_id,
+        'message_id': message_id,
+        'text': text,
+    }
+    if reply_markup is not None:
+        params['reply_markup'] = reply_markup
+    if parse_mode:
+        params['parse_mode'] = parse_mode
+    return tg_call('editMessageText', json=params)
+
+
 def send_document(chat_id, file_path, caption=None):
     data = {'chat_id': chat_id}
     if caption:
@@ -1097,12 +1110,68 @@ def build_language_keyboard():
         rows.append(row)
     return {'inline_keyboard': rows}
 
-def build_package_keyboard():
-    rows = [[
-        {'text': '%s - %s' % (pkg['label'], format_money(pkg['priceCents'], pkg['currency'])),
-         'callback_data': 'package:%s' % pkg['key']}
-    ] for pkg in load_packages()]
+def build_category_keyboard():
+    rows = [
+        [{'text': '🎓 Freshman', 'callback_data': 'cat:freshman'}],
+        [{'text': '🏛 University Department', 'callback_data': 'cat:university'}],
+        [{'text': '📋 COC Exam Preparation', 'callback_data': 'cat:coc'}],
+        [{'text': '📚 EUEE / UAT / Other Packages', 'callback_data': 'cat:other'}]
+    ]
     return {'inline_keyboard': rows}
+
+def build_freshman_stream_keyboard():
+    rows = [
+        [{'text': '🧪 Natural Science (Year 1)', 'callback_data': 'freshman:nat'}],
+        [{'text': '📐 Social Science (Year 1)', 'callback_data': 'freshman:soc'}],
+        [{'text': '🔙 Back to Categories', 'callback_data': 'cat:main'}]
+    ]
+    return {'inline_keyboard': rows}
+
+def build_plan_keyboard(prefix):
+    rows = [
+        [{'text': 'Semester 1 — 300 ETB', 'callback_data': '%s_sem1' % prefix}],
+        [{'text': 'Semester 2 — 300 ETB', 'callback_data': '%s_sem2' % prefix}],
+        [{'text': '🌟 Full Academic Year — 500 ETB (Unlocks Both)', 'callback_data': '%s_full_year' % prefix}],
+        [{'text': '🔙 Back', 'callback_data': 'cat:main'}]
+    ]
+    return {'inline_keyboard': rows}
+
+def build_university_year_keyboard():
+    rows = [
+        [{'text': 'Year 2', 'callback_data': 'univ_yr:2'}, {'text': 'Year 3', 'callback_data': 'univ_yr:3'}],
+        [{'text': 'Year 4', 'callback_data': 'univ_yr:4'}, {'text': 'Year 5', 'callback_data': 'univ_yr:5'}],
+        [{'text': '🔙 Back to Categories', 'callback_data': 'cat:main'}]
+    ]
+    return {'inline_keyboard': rows}
+
+def build_university_dept_keyboard(year):
+    departments = [
+        ('💻 Computer Science', 'computer_science'),
+        ('⚡ Electrical Engineering', 'electrical_engineering'),
+        ('🏗 Civil Engineering', 'civil_engineering'),
+        ('⚙️ Mechanical Engineering', 'mechanical_engineering'),
+        ('📊 Accounting & Finance', 'accounting_finance'),
+        ('💼 Business Administration', 'business_admin'),
+        ('🩺 Medicine', 'medicine'),
+        ('⚖️ Law', 'law')
+    ]
+    rows = []
+    for label, dept_key in departments:
+        rows.append([{'text': label, 'callback_data': 'univ_dept:%s:y%s' % (dept_key, year)}])
+    rows.append([{'text': '🔙 Back to Years', 'callback_data': 'cat:university'}])
+    return {'inline_keyboard': rows}
+
+def build_coc_keyboard():
+    rows = [
+        [{'text': '🏥 Medical COC Exam — 400 ETB', 'callback_data': 'package:coc_medical'}],
+        [{'text': '⚖️ Law COC Exam — 400 ETB', 'callback_data': 'package:coc_law'}],
+        [{'text': '🏗️ Engineering COC Exam — 400 ETB', 'callback_data': 'package:coc_engineering'}],
+        [{'text': '🔙 Back to Categories', 'callback_data': 'cat:main'}]
+    ]
+    return {'inline_keyboard': rows}
+
+def build_package_keyboard():
+    return build_category_keyboard()
 
 def build_phone_share_keyboard(user_id=None):
     btn_text = get_msg(user_id, 'share_phone_btn') if user_id else '📱 Share Phone Number'
@@ -2608,9 +2677,75 @@ def handle_callback(update):
         send_message(chat_id, get_msg(user.get('id'), 'cancelled'))
         return True
 
+    if data == 'cat:main':
+        answer_callback_query(callback_id, 'Main Categories')
+        if message_id:
+            edit_message_text(chat_id, message_id, 'Please choose a package category below:', reply_markup=build_category_keyboard())
+        return True
+
+    if data == 'cat:freshman':
+        answer_callback_query(callback_id, 'Freshman')
+        if message_id:
+            edit_message_text(chat_id, message_id, '🎓 *Freshman Year 1*\nSelect your stream:', parse_mode='Markdown', reply_markup=build_freshman_stream_keyboard())
+        return True
+
+    if data == 'cat:university':
+        answer_callback_query(callback_id, 'University Department')
+        if message_id:
+            edit_message_text(chat_id, message_id, '🏛 *University Department*\nSelect your Academic Year:', parse_mode='Markdown', reply_markup=build_university_year_keyboard())
+        return True
+
+    if data == 'cat:coc':
+        answer_callback_query(callback_id, 'COC Exam Preparation')
+        if message_id:
+            edit_message_text(chat_id, message_id, '📋 *COC Exam Preparation*\nSelect your exam field:', parse_mode='Markdown', reply_markup=build_coc_keyboard())
+        return True
+
+    if data == 'cat:other':
+        answer_callback_query(callback_id, 'Other Packages')
+        other_rows = [[
+            {'text': '%s - %s' % (pkg['label'], format_money(pkg['priceCents'], pkg['currency'])),
+             'callback_data': 'package:%s' % pkg['key']}
+        ] for pkg in load_packages()]
+        other_rows.append([{'text': '🔙 Back to Categories', 'callback_data': 'cat:main'}])
+        if message_id:
+            edit_message_text(chat_id, message_id, '📚 *Other Packages*\nSelect a package:', parse_mode='Markdown', reply_markup={'inline_keyboard': other_rows})
+        return True
+
+    if data.startswith('freshman:'):
+        stream = data.split(':', 1)[1]
+        prefix = 'freshman_natural_science_y1' if stream == 'nat' else 'freshman_social_science_y1'
+        stream_name = 'Natural Science' if stream == 'nat' else 'Social Science'
+        answer_callback_query(callback_id, stream_name)
+        if message_id:
+            edit_message_text(chat_id, message_id, '🎓 *Freshman %s (Year 1)*\nSelect your duration / plan:' % stream_name, parse_mode='Markdown', reply_markup=build_plan_keyboard(prefix))
+        return True
+
+    if data.startswith('univ_yr:'):
+        year = data.split(':', 1)[1]
+        answer_callback_query(callback_id, 'Year %s' % year)
+        if message_id:
+            edit_message_text(chat_id, message_id, '🏛 *University Year %s*\nSelect your Department:' % year, parse_mode='Markdown', reply_markup=build_university_dept_keyboard(year))
+        return True
+
+    if data.startswith('univ_dept:'):
+        parts = data.split(':')
+        dept_key = parts[1]
+        year = parts[2].replace('y', '')
+        prefix = 'university_%s_y%s' % (dept_key, year)
+        dept_label = dept_key.replace('_', ' ').title()
+        answer_callback_query(callback_id, dept_label)
+        if message_id:
+            edit_message_text(chat_id, message_id, '🏛 *%s (Year %s)*\nSelect your duration / plan:' % (dept_label, year), parse_mode='Markdown', reply_markup=build_plan_keyboard(prefix))
+        return True
+
     if data.startswith('package:'):
         package_key = data.split(':', 1)[1]
-        package = get_package_by_key(package_key)
+        pcfg = get_product_config(package_key)
+        if pcfg:
+            package = {'key': pcfg['id'], 'label': pcfg['label'], 'priceCents': pcfg['priceCents'], 'currency': pcfg.get('currency', 'ETB')}
+        else:
+            package = get_package_by_key(package_key)
         if not package:
             answer_callback_query(callback_id, 'Unknown package')
             return True

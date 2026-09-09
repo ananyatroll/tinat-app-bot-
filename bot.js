@@ -147,13 +147,77 @@ function getPackageByKey(packageKey) {
   return PACKAGES.find((pkg) => pkg.key === packageKey) || null;
 }
 
-function buildPackageKeyboard(packages) {
+function buildCategoryKeyboard() {
   return {
-    inline_keyboard: packages.map((pkg) => ([{
-      text: `${pkg.label} - ${formatMoney(pkg.priceCents, pkg.currency)}`,
-      callback_data: `package:${pkg.key}`
-    }]))
+    inline_keyboard: [
+      [{ text: '🎓 Freshman', callback_data: 'cat:freshman' }],
+      [{ text: '🏛 University Department', callback_data: 'cat:university' }],
+      [{ text: '📋 COC Exam Preparation', callback_data: 'cat:coc' }],
+      [{ text: '📚 EUEE / UAT / Other Packages', callback_data: 'cat:other' }]
+    ]
   };
+}
+
+function buildFreshmanStreamKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '🧪 Natural Science (Year 1)', callback_data: 'freshman:nat' }],
+      [{ text: '📐 Social Science (Year 1)', callback_data: 'freshman:soc' }],
+      [{ text: '🔙 Back to Categories', callback_data: 'cat:main' }]
+    ]
+  };
+}
+
+function buildPlanKeyboard(prefix) {
+  return {
+    inline_keyboard: [
+      [{ text: 'Semester 1 — 300 ETB', callback_data: `${prefix}_sem1` }],
+      [{ text: 'Semester 2 — 300 ETB', callback_data: `${prefix}_sem2` }],
+      [{ text: '🌟 Full Academic Year — 500 ETB (Unlocks Both)', callback_data: `${prefix}_full_year` }],
+      [{ text: '🔙 Back', callback_data: 'cat:main' }]
+    ]
+  };
+}
+
+function buildUniversityYearKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: 'Year 2', callback_data: 'univ_yr:2' }, { text: 'Year 3', callback_data: 'univ_yr:3' }],
+      [{ text: 'Year 4', callback_data: 'univ_yr:4' }, { text: 'Year 5', callback_data: 'univ_yr:5' }],
+      [{ text: '🔙 Back to Categories', callback_data: 'cat:main' }]
+    ]
+  };
+}
+
+function buildUniversityDeptKeyboard(year) {
+  const depts = [
+    ['💻 Computer Science', 'computer_science'],
+    ['⚡ Electrical Engineering', 'electrical_engineering'],
+    ['🏗 Civil Engineering', 'civil_engineering'],
+    ['⚙️ Mechanical Engineering', 'mechanical_engineering'],
+    ['📊 Accounting & Finance', 'accounting_finance'],
+    ['💼 Business Administration', 'business_admin'],
+    ['🩺 Medicine', 'medicine'],
+    ['⚖️ Law', 'law']
+  ];
+  const rows = depts.map(([label, key]) => [{ text: label, callback_data: `univ_dept:${key}:y${year}` }]);
+  rows.push([{ text: '🔙 Back to Years', callback_data: 'cat:university' }]);
+  return { inline_keyboard: rows };
+}
+
+function buildCocKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '🏥 Medical COC Exam — 400 ETB', callback_data: 'package:coc_medical' }],
+      [{ text: '⚖️ Law COC Exam — 400 ETB', callback_data: 'package:coc_law' }],
+      [{ text: '🏗️ Engineering COC Exam — 400 ETB', callback_data: 'package:coc_engineering' }],
+      [{ text: '🔙 Back to Categories', callback_data: 'cat:main' }]
+    ]
+  };
+}
+
+function buildPackageKeyboard(packages) {
+  return buildCategoryKeyboard();
 }
 
 const PAYMENT_METHODS = [
@@ -935,9 +999,72 @@ bot.action(/^(approve|reject):(.+)$/, async (ctx) => {
   }
 });
 
+bot.action('cat:main', async (ctx) => {
+  await ctx.answerCbQuery('Main Categories');
+  await ctx.editMessageText('Please choose a package category below:', buildCategoryKeyboard());
+});
+
+bot.action('cat:freshman', async (ctx) => {
+  await ctx.answerCbQuery('Freshman');
+  await ctx.editMessageText('🎓 *Freshman Year 1*\nSelect your stream:', { parse_mode: 'Markdown', ...buildFreshmanStreamKeyboard() });
+});
+
+bot.action('cat:university', async (ctx) => {
+  await ctx.answerCbQuery('University Department');
+  await ctx.editMessageText('🏛 *University Department*\nSelect your Academic Year:', { parse_mode: 'Markdown', ...buildUniversityYearKeyboard() });
+});
+
+bot.action('cat:coc', async (ctx) => {
+  await ctx.answerCbQuery('COC Exam Preparation');
+  await ctx.editMessageText('📋 *COC Exam Preparation*\nSelect your exam field:', { parse_mode: 'Markdown', ...buildCocKeyboard() });
+});
+
+bot.action('cat:other', async (ctx) => {
+  await ctx.answerCbQuery('Other Packages');
+  const packages = getPackageList();
+  const otherRows = packages.map((pkg) => ([{
+    text: `${pkg.label} - ${formatMoney(pkg.priceCents, pkg.currency)}`,
+    callback_data: `package:${pkg.key}`
+  }]));
+  otherRows.push([{ text: '🔙 Back to Categories', callback_data: 'cat:main' }]);
+  await ctx.editMessageText('📚 *Other Packages*\nSelect a package:', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: otherRows } });
+});
+
+bot.action(/^freshman:(.+)$/, async (ctx) => {
+  const stream = ctx.match[1];
+  const prefix = stream === 'nat' ? 'freshman_natural_science_y1' : 'freshman_social_science_y1';
+  const streamName = stream === 'nat' ? 'Natural Science' : 'Social Science';
+  await ctx.answerCbQuery(streamName);
+  await ctx.editMessageText(`🎓 *Freshman ${streamName} (Year 1)*\nSelect your duration / plan:`, { parse_mode: 'Markdown', ...buildPlanKeyboard(prefix) });
+});
+
+bot.action(/^univ_yr:(.+)$/, async (ctx) => {
+  const year = ctx.match[1];
+  await ctx.answerCbQuery(`Year ${year}`);
+  await ctx.editMessageText(`🏛 *University Year ${year}*\nSelect your Department:`, { parse_mode: 'Markdown', ...buildUniversityDeptKeyboard(year) });
+});
+
+bot.action(/^univ_dept:(.+):y(.+)$/, async (ctx) => {
+  const deptKey = ctx.match[1];
+  const year = ctx.match[2];
+  const prefix = `university_${deptKey}_y${year}`;
+  const deptLabel = deptKey.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+  await ctx.answerCbQuery(deptLabel);
+  await ctx.editMessageText(`🏛 *${deptLabel} (Year ${year})*\nSelect your duration / plan:`, { parse_mode: 'Markdown', ...buildPlanKeyboard(prefix) });
+});
+
 bot.action(/^package:(.+)$/, async (ctx) => {
   const packageKey = ctx.match[1];
-  const pkg = getPackageByKey(packageKey);
+  let pkg = getPackageByKey(packageKey);
+  if (!pkg) {
+    // Generate dynamic info for semester/full year/COC packages
+    const isFull = packageKey.endsWith('_full_year');
+    const isSem = packageKey.includes('_sem');
+    const isCoc = packageKey.startsWith('coc_');
+    const price = isFull ? 50000 : (isCoc ? 40000 : 30000);
+    const label = packageKey.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    pkg = { key: packageKey, label, priceCents: price, currency: 'ETB' };
+  }
 
   if (!pkg) {
     await ctx.answerCbQuery('Package not found.');

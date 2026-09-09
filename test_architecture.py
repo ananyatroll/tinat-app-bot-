@@ -161,9 +161,25 @@ class TestTemhiroBotArchitecture(unittest.TestCase):
         self.assertEqual(pkg['label'], 'Freshman Natural Science - Semester 1')
         self.assertEqual(pkg['priceCents'], 30000)
 
+    def test_category_navigation_callbacks(self):
+        user_id = 554433
+        user_obj = {'id': user_id, 'first_name': 'NavUser'}
+
+        # Category callbacks
+        for cat in ['cat:main', 'cat:freshman', 'cat:university', 'cat:coc', 'cat:other']:
+            cb = {'callback_query': {'id': 'cb_' + cat, 'data': cat, 'from': user_obj, 'message': {'chat': {'id': user_id}, 'message_id': 50}}}
+            self.assertTrue(flask_app.handle_callback(cb))
+
+        # Freshman stream callback
+        cb_nat = {'callback_query': {'id': 'cb_nat', 'data': 'freshman:nat', 'from': user_obj, 'message': {'chat': {'id': user_id}, 'message_id': 50}}}
+        self.assertTrue(flask_app.handle_callback(cb_nat))
+
+        # University year and dept callbacks
+        cb_yr = {'callback_query': {'id': 'cb_yr', 'data': 'univ_yr:2', 'from': user_obj, 'message': {'chat': {'id': user_id}, 'message_id': 50}}}
+        self.assertTrue(flask_app.handle_callback(cb_yr))
+
+        cb_dept = {'callback_query': {'id': 'cb_dept', 'data': 'univ_dept:computer_science:y2', 'from': user_obj, 'message': {'chat': {'id': user_id}, 'message_id': 50}}}
+        self.assertTrue(flask_app.handle_callback(cb_dept))
+
 if __name__ == '__main__':
     unittest.main()
-
-
-
-
