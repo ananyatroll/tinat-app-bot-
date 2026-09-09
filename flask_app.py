@@ -182,6 +182,7 @@ DEFAULT_PACKAGES = [
     {'key': 'freshman', 'label': 'Freshman', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'freshman'},
     {'key': 'uat', 'label': 'UAT', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'uat'},
     {'key': 'university-department', 'label': 'University Department', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'university-department'},
+    {'key': 'coc', 'label': '📋 COC Exam Preparation', 'priceCents': 40000, 'currency': 'ETB', 'phrasePool': 'exit-exam'},
     {'key': 'exit-exam', 'label': 'Exit Exam', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'exit-exam'},
 ]
 
@@ -2755,8 +2756,8 @@ def handle_callback(update):
             if message_id:
                 edit_message_text(chat_id, message_id, '🏛 *University Department*\nSelect your Academic Year:', parse_mode='Markdown', reply_markup=build_university_year_keyboard())
             return True
-        if package_key == 'exit-exam':
-            answer_callback_query(callback_id, 'Exit / COC Exam')
+        if package_key == 'coc' or package_key == 'exit-exam':
+            answer_callback_query(callback_id, 'COC / Exit Exam')
             if message_id:
                 edit_message_text(chat_id, message_id, '📋 *COC Exam Preparation*\nSelect your exam field:', parse_mode='Markdown', reply_markup=build_coc_keyboard())
             return True
