@@ -127,6 +127,40 @@ class TestTemhiroBotArchitecture(unittest.TestCase):
         self.assertIsNotNone(req2)
         self.assertNotEqual(req1['requestId'], req2['requestId'])
 
+    def test_admin_guided_addpackage_flow(self):
+        admin_id = 12345
+        admin_obj = {'id': admin_id, 'first_name': 'Admin'}
+
+        # Step 1: Send /addpackage without args
+        up1 = {'message': {'chat': {'id': admin_id}, 'from': admin_obj, 'text': '/addpackage'}}
+        self.assertTrue(flask_app.handle_message(up1))
+        draft = flask_app._get_draft(admin_id)
+        self.assertEqual(draft.get('admin_step'), 'addpkg_name')
+
+        # Step 2: Send Label/Name
+        up2 = {'message': {'chat': {'id': admin_id}, 'from': admin_obj, 'text': 'Freshman Natural Science - Semester 1'}}
+        self.assertTrue(flask_app.handle_message(up2))
+        draft = flask_app._get_draft(admin_id)
+        self.assertEqual(draft.get('admin_step'), 'addpkg_key')
+        self.assertEqual(draft.get('addpkg_label'), 'Freshman Natural Science - Semester 1')
+
+        # Step 3: Send Tag/Key
+        up3 = {'message': {'chat': {'id': admin_id}, 'from': admin_obj, 'text': 'custom_freshman_sem1'}}
+        self.assertTrue(flask_app.handle_message(up3))
+        draft = flask_app._get_draft(admin_id)
+        self.assertEqual(draft.get('admin_step'), 'addpkg_price')
+        self.assertEqual(draft.get('addpkg_key'), 'custom_freshman_sem1')
+
+        # Step 4: Send Price Tag in ETB
+        up4 = {'message': {'chat': {'id': admin_id}, 'from': admin_obj, 'text': '300'}}
+        self.assertTrue(flask_app.handle_message(up4))
+        
+        # Verify package saved
+        pkg = flask_app.get_package_by_key('custom_freshman_sem1')
+        self.assertIsNotNone(pkg)
+        self.assertEqual(pkg['label'], 'Freshman Natural Science - Semester 1')
+        self.assertEqual(pkg['priceCents'], 30000)
+
 if __name__ == '__main__':
     unittest.main()
 

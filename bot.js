@@ -106,13 +106,17 @@ function formatMoney(cents, currency = 'USD') {
 function loadPackages() {
   const rawPackages = process.env.PACKAGES_JSON;
   if (!rawPackages) {
-    return [{
-      key: 'default',
-      label: process.env.ACCESS_LABEL || 'Tinat Access',
-      priceCents: Number(process.env.PRICE_CENTS || 5000),
-      currency: (process.env.CURRENCY || 'USD').toUpperCase(),
-      phrasePool: 'default'
-    }];
+    return [
+      { key: 'freshman_natural_science_y1_sem1', label: 'Freshman Natural Science - Year 1 Semester 1', priceCents: 30000, currency: 'ETB', phrasePool: 'freshman' },
+      { key: 'freshman_natural_science_y1_sem2', label: 'Freshman Natural Science - Year 1 Semester 2', priceCents: 30000, currency: 'ETB', phrasePool: 'freshman' },
+      { key: 'freshman_natural_science_y1_full_year', label: 'Freshman Natural Science - Year 1 Full Academic Year', priceCents: 50000, currency: 'ETB', phrasePool: 'freshman' },
+      { key: 'freshman_social_science_y1_sem1', label: 'Freshman Social Science - Year 1 Semester 1', priceCents: 30000, currency: 'ETB', phrasePool: 'freshman' },
+      { key: 'freshman_social_science_y1_sem2', label: 'Freshman Social Science - Year 1 Semester 2', priceCents: 30000, currency: 'ETB', phrasePool: 'freshman' },
+      { key: 'freshman_social_science_y1_full_year', label: 'Freshman Social Science - Year 1 Full Academic Year', priceCents: 50000, currency: 'ETB', phrasePool: 'freshman' },
+      { key: 'coc_medical', label: '🏥 Medical COC Exam Preparation', priceCents: 40000, currency: 'ETB', phrasePool: 'exit-exam' },
+      { key: 'coc_law', label: '⚖️ Law COC Exam Preparation', priceCents: 40000, currency: 'ETB', phrasePool: 'exit-exam' },
+      { key: 'coc_engineering', label: '🏗️ Engineering COC Exam Preparation', priceCents: 40000, currency: 'ETB', phrasePool: 'exit-exam' }
+    ];
   }
 
   let parsed;

@@ -782,17 +782,16 @@ def get_product_config(product_id):
         }
     
     # Fallback to load_packages
-    pkg = get_package_by_key(product_id)
-    if pkg:
-        return {
-            'id': pkg['key'],
-            'category': 'general',
-            'label': pkg['label'],
-            'priceCents': pkg['priceCents'],
-            'currency': pkg.get('currency', 'ETB'),
-            'entitlements': [pkg['key']],
-            'phrasePool': pkg.get('phrasePool', pkg['key']),
-        }
+    for pkg in load_packages():
+        if pkg['key'] == product_id:
+            return {
+                'id': pkg['key'],
+                'category': 'general',
+                'label': pkg['label'],
+                'priceCents': pkg['priceCents'],
+                'currency': pkg.get('currency', 'ETB'),
+                'phrasePool': pkg.get('phrasePool', pkg['key']),
+            }
     return None
 
 def get_product_price(product_id):
@@ -2309,11 +2308,16 @@ def handle_message(update):
             send_message(chat_id, '\n'.join(lines), parse_mode='Markdown')
             return True
 
+        if text == '/addpackage' or text == '/addpackage ':
+            _save_draft(chat_id, {'admin_step': 'addpkg_name', 'updatedAt': utcnow()})
+            send_message(chat_id, '✏️ Please send the package *Name / Label* (e.g. `Freshman Natural Science - Semester 1`):', parse_mode='Markdown')
+            return True
+
         if text.startswith('/addpackage '):
             raw = text.split(' ', 1)[1].strip()
             parts = [p.strip() for p in raw.split('|')]
             if len(parts) < 3:
-                send_message(chat_id, 'Usage: `/addpackage <key> | <label> | <price_etb>`', parse_mode='Markdown')
+                send_message(chat_id, 'Usage: `/addpackage <key> | <label> | <price_etb>` or simply send `/addpackage` for guided setup.', parse_mode='Markdown')
                 return True
             key, label, price_str = parts[0], parts[1], parts[2]
             try:
@@ -2460,6 +2464,46 @@ def handle_message(update):
             lines.append('  (none)')
         send_message(chat_id, '\n'.join(lines))
         return True
+
+    if is_admin(chat_id):
+        admin_draft = _get_draft(chat_id) or {}
+        admin_step = admin_draft.get('admin_step')
+        if admin_step == 'addpkg_name':
+            label = text.strip()
+            admin_draft['addpkg_label'] = label
+            admin_draft['admin_step'] = 'addpkg_key'
+            _save_draft(chat_id, admin_draft)
+            send_message(chat_id, '🔑 Got it! Now send the package *Tag / Key* (e.g. `freshman_natural_science_y1_sem1`):', parse_mode='Markdown')
+            return True
+        elif admin_step == 'addpkg_key':
+            key = text.strip().lower().replace(' ', '_')
+            admin_draft['addpkg_key'] = key
+            admin_draft['admin_step'] = 'addpkg_price'
+            _save_draft(chat_id, admin_draft)
+            send_message(chat_id, '💰 Great! Finally, send the *Price Tag in ETB* (e.g. `300`):', parse_mode='Markdown')
+            return True
+        elif admin_step == 'addpkg_price':
+            price_str = text.strip()
+            try:
+                price_cents = int(float(price_str) * 100)
+            except ValueError:
+                send_message(chat_id, '⚠️ Invalid price amount. Please enter a valid number (e.g. `300`):', parse_mode='Markdown')
+                return True
+            label = admin_draft.get('addpkg_label') or 'New Package'
+            key = admin_draft.get('addpkg_key') or 'new_package'
+            pkgs = load_packages()
+            pkgs = [p for p in pkgs if p['key'] != key]
+            pkgs.append({
+                'key': key,
+                'label': label,
+                'priceCents': price_cents,
+                'currency': 'ETB',
+                'phrasePool': key,
+            })
+            save_packages(pkgs)
+            _save_draft(chat_id, {})
+            send_message(chat_id, '✅ Package successfully added!\n\n📌 *Name:* %s\n🏷 *Tag:* `%s`\n💰 *Price:* %s ETB' % (label, key, price_str), parse_mode='Markdown')
+            return True
 
     if not text or text.startswith('/'):
         return False
