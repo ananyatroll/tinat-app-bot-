@@ -2695,38 +2695,9 @@ def handle_callback(update):
         return True
 
     if data == 'cat:main':
-        answer_callback_query(callback_id, 'Main Categories')
+        answer_callback_query(callback_id, 'Main Menu')
         if message_id:
-            edit_message_text(chat_id, message_id, 'Please choose a package category below:', reply_markup=build_category_keyboard())
-        return True
-
-    if data == 'cat:freshman':
-        answer_callback_query(callback_id, 'Freshman')
-        if message_id:
-            edit_message_text(chat_id, message_id, '🎓 *Freshman Year 1*\nSelect your stream:', parse_mode='Markdown', reply_markup=build_freshman_stream_keyboard())
-        return True
-
-    if data == 'cat:university':
-        answer_callback_query(callback_id, 'University Department')
-        if message_id:
-            edit_message_text(chat_id, message_id, '🏛 *University Department*\nSelect your Academic Year:', parse_mode='Markdown', reply_markup=build_university_year_keyboard())
-        return True
-
-    if data == 'cat:coc':
-        answer_callback_query(callback_id, 'COC Exam Preparation')
-        if message_id:
-            edit_message_text(chat_id, message_id, '📋 *COC Exam Preparation*\nSelect your exam field:', parse_mode='Markdown', reply_markup=build_coc_keyboard())
-        return True
-
-    if data == 'cat:other':
-        answer_callback_query(callback_id, 'Other Packages')
-        other_rows = [[
-            {'text': '%s - %s' % (pkg['label'], format_money(pkg['priceCents'], pkg['currency'])),
-             'callback_data': 'package:%s' % pkg['key']}
-        ] for pkg in load_packages()]
-        other_rows.append([{'text': '🔙 Back to Categories', 'callback_data': 'cat:main'}])
-        if message_id:
-            edit_message_text(chat_id, message_id, '📚 *Other Packages*\nSelect a package:', parse_mode='Markdown', reply_markup={'inline_keyboard': other_rows})
+            edit_message_text(chat_id, message_id, get_start_message(user.get('id')), reply_markup=build_package_keyboard())
         return True
 
     if data.startswith('freshman:'):

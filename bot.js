@@ -1016,34 +1016,8 @@ bot.action(/^(approve|reject):(.+)$/, async (ctx) => {
 });
 
 bot.action('cat:main', async (ctx) => {
-  await ctx.answerCbQuery('Main Categories');
-  await ctx.editMessageText('Please choose a package category below:', buildCategoryKeyboard());
-});
-
-bot.action('cat:freshman', async (ctx) => {
-  await ctx.answerCbQuery('Freshman');
-  await ctx.editMessageText('🎓 *Freshman Year 1*\nSelect your stream:', { parse_mode: 'Markdown', ...buildFreshmanStreamKeyboard() });
-});
-
-bot.action('cat:university', async (ctx) => {
-  await ctx.answerCbQuery('University Department');
-  await ctx.editMessageText('🏛 *University Department*\nSelect your Academic Year:', { parse_mode: 'Markdown', ...buildUniversityYearKeyboard() });
-});
-
-bot.action('cat:coc', async (ctx) => {
-  await ctx.answerCbQuery('COC Exam Preparation');
-  await ctx.editMessageText('📋 *COC Exam Preparation*\nSelect your exam field:', { parse_mode: 'Markdown', ...buildCocKeyboard() });
-});
-
-bot.action('cat:other', async (ctx) => {
-  await ctx.answerCbQuery('Other Packages');
-  const packages = getPackageList();
-  const otherRows = packages.map((pkg) => ([{
-    text: `${pkg.label} - ${formatMoney(pkg.priceCents, pkg.currency)}`,
-    callback_data: `package:${pkg.key}`
-  }]));
-  otherRows.push([{ text: '🔙 Back to Categories', callback_data: 'cat:main' }]);
-  await ctx.editMessageText('📚 *Other Packages*\nSelect a package:', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: otherRows } });
+  await ctx.answerCbQuery('Main Menu');
+  await ctx.editMessageText('Choose a package below:', buildPackageKeyboard(getPackageList()));
 });
 
 bot.action(/^freshman:(.+)$/, async (ctx) => {
