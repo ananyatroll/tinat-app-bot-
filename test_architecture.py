@@ -14,6 +14,7 @@ class TestTemhiroBotArchitecture(unittest.TestCase):
         flask_app.ENTITLEMENTS_FILE = os.path.join(self.temp_dir, "entitlements.json")
         flask_app.PURCHASES_FILE = os.path.join(self.temp_dir, "purchases.json")
         flask_app.PACKAGES_FILE = os.path.join(self.temp_dir, "packages.json")
+        flask_app.ADMIN_CHAT_ID = "12345"
         flask_app.app.testing = True
         self.client = flask_app.app.test_client()
 
@@ -56,7 +57,79 @@ class TestTemhiroBotArchitecture(unittest.TestCase):
         self.assertEqual(get_purchase['priceCents'], 50000)
         self.assertEqual(sorted(get_purchase['entitlements']), ['freshman_natural_science_y1_sem1', 'freshman_natural_science_y1_sem2'])
 
+    def test_telegram_purchase_ref_state_machine_and_approval(self):
+        user_id = 998877
+        user_obj = {'id': user_id, 'first_name': 'TestUser'}
+
+        # 1. Create a Purchase Reference
+        res = self.client.post('/api/v1/purchases/create', json={
+            'productId': 'freshman_natural_science_y1_full_year',
+            'userId': str(user_id)
+        })
+        self.assertEqual(res.status_code, 200)
+        ref = res.get_json()['purchaseReference']
+
+        # 2. User inputs purchase reference in Telegram chat
+        handled = flask_app.handle_draft_step(user_obj, ref)
+        self.assertTrue(handled)
+
+        draft = flask_app._get_draft(user_id)
+        self.assertEqual(draft['step'], 'ref_confirm')
+        self.assertEqual(draft['purchaseReference'], ref)
+
+        # 3. User clicks Confirm
+        callback_update = {
+            'callback_query': {
+                'id': 'cb_123',
+                'data': f'confirm_ref:{ref}',
+                'from': user_obj,
+                'message': {'chat': {'id': user_id}, 'message_id': 1}
+            }
+        }
+        cb_handled = flask_app.handle_callback(callback_update)
+        self.assertTrue(cb_handled)
+
+        draft_after_confirm = flask_app._get_draft(user_id)
+        self.assertEqual(draft_after_confirm['step'], 'phone')
+
+    def test_repeat_purchases_and_language_switching(self):
+        user_id = 112233
+        user_obj = {'id': user_id, 'first_name': 'RepeatUser'}
+
+        # Select Afaan Oromoo language
+        cb_lang = {
+            'callback_query': {
+                'id': 'cb_lang_1',
+                'data': 'lang:om',
+                'from': user_obj,
+                'message': {'chat': {'id': user_id}, 'message_id': 10}
+            }
+        }
+        self.assertTrue(flask_app.handle_callback(cb_lang))
+        self.assertEqual(flask_app.get_user_lang(user_id), 'om')
+
+        # Verify start message in Oromiffa
+        msg = flask_app.get_start_message(user_id)
+        self.assertIn("Application Barnoota Temhiro", msg)
+
+        # First purchase submit
+        draft = {'package': 'freshman', 'phone': {'number': '251911111111', 'verified': True}, 'method': 'cbe', 'name': 'User 1', 'link': 'https://mbreciept.cbe.com.et/test', 'txid': 'FT123456', 'step': 'done'}
+        req1 = flask_app.submit_request(user_id, draft)
+        self.assertIsNotNone(req1)
+
+        # /start again for a second purchase
+        start_update = {'message': {'chat': {'id': user_id}, 'from': user_obj, 'text': '/start'}}
+        self.assertTrue(flask_app.handle_message(start_update))
+
+        # Second purchase submit
+        draft2 = {'package': 'freshman', 'phone': {'number': '251911111111', 'verified': True}, 'method': 'telebirr', 'name': 'User 1', 'link': 'https://transactioninfo.ethiotelecom.et/receipt/test', 'txid': 'DG123456', 'step': 'done'}
+        req2 = flask_app.submit_request(user_id, draft2)
+        self.assertIsNotNone(req2)
+        self.assertNotEqual(req1['requestId'], req2['requestId'])
+
 if __name__ == '__main__':
     unittest.main()
+
+
 
 

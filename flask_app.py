@@ -1994,18 +1994,8 @@ def _latest_request_for_user(requests, user_id):
 
 
 def _submit(data, user_id, draft):
-    """Create (or look up) the request for a user from their finished draft."""
+    """Create a new purchase request for a user from their finished draft."""
     requests = data.setdefault('requests', {})
-    existing = _latest_request_for_user(requests, user_id)
-    if existing:
-        status = existing.get('status')
-        if status in ('pending', 'approved', 'pending_assignment'):
-            return existing
-        if status == 'rejected':
-            existing['status'] = 'superseded'
-            existing['updatedAt'] = utcnow()
-        elif status == 'delivered' and existing.get('packageKey') == draft.get('package'):
-            return existing
 
     profile = _get_user_profile(data, user_id)
     package = get_package_by_key(draft.get('package')) or DEFAULT_PACKAGES[0]
@@ -2415,6 +2405,8 @@ def handle_message(update):
         return True
 
     if text in ('/start', '/buy'):
+        draft = _new_draft(chat_id)
+        _save_draft(chat_id, draft)
         send_message(chat_id, get_msg(chat_id, 'lang_select'), reply_markup=build_language_keyboard())
         return True
 
@@ -2536,6 +2528,8 @@ def handle_callback(update):
         answer_callback_query(callback_id, 'Language updated')
         if message_id:
             edit_message_reply_markup(chat_id, message_id)
+        draft = _new_draft(user.get('id'))
+        _save_draft(user.get('id'), draft)
         send_message(chat_id, get_start_message(user.get('id')), reply_markup=build_package_keyboard())
         return True
 
