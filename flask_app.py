@@ -529,10 +529,12 @@ def tg_call(method, timeout=30, **kwargs):
         return None
 
 
-def send_message(chat_id, text, reply_markup=None):
+def send_message(chat_id, text, reply_markup=None, parse_mode=None):
     params = {'chat_id': chat_id, 'text': text}
     if reply_markup is not None:
         params['reply_markup'] = reply_markup
+    if parse_mode:
+        params['parse_mode'] = parse_mode
     return tg_call('sendMessage', json=params)
 
 
@@ -543,11 +545,11 @@ def answer_callback_query(callback_query_id, text=None):
     return tg_call('answerCallbackQuery', json=params)
 
 
-def edit_message_reply_markup(chat_id, message_id):
+def edit_message_reply_markup(chat_id, message_id, reply_markup=None):
     params = {
         'chat_id': chat_id,
         'message_id': message_id,
-        'reply_markup': {'inline_keyboard': []},
+        'reply_markup': reply_markup or {'inline_keyboard': []},
     }
     return tg_call('editMessageReplyMarkup', json=params)
 
@@ -582,9 +584,541 @@ def can_assign_vouchers(user_id):
 
 
 # ---------------------------------------------------------------------------
-# Message builders
+# Canonical Product Catalog & Entitlement Mappings
+# Architecture: Freshman, University, and COC Exam
 # ---------------------------------------------------------------------------
 
+CANONICAL_PRODUCTS = {
+    # Freshman Natural Science
+    'freshman_natural_science_y1_sem1': {
+        'id': 'freshman_natural_science_y1_sem1',
+        'category': 'freshman',
+        'label': 'Freshman Natural Science - Year 1 Semester 1',
+        'priceCents': 30000,
+        'currency': 'ETB',
+        'entitlements': ['freshman_natural_science_y1_sem1'],
+        'phrasePool': 'freshman',
+    },
+    'freshman_natural_science_y1_sem2': {
+        'id': 'freshman_natural_science_y1_sem2',
+        'category': 'freshman',
+        'label': 'Freshman Natural Science - Year 1 Semester 2',
+        'priceCents': 30000,
+        'currency': 'ETB',
+        'entitlements': ['freshman_natural_science_y1_sem2'],
+        'phrasePool': 'freshman',
+    },
+    'freshman_natural_science_y1_full_year': {
+        'id': 'freshman_natural_science_y1_full_year',
+        'category': 'freshman',
+        'label': 'Freshman Natural Science - Year 1 Full Academic Year',
+        'priceCents': 50000,
+        'currency': 'ETB',
+        'entitlements': ['freshman_natural_science_y1_sem1', 'freshman_natural_science_y1_sem2'],
+        'phrasePool': 'freshman',
+    },
+
+    # Freshman Social Science
+    'freshman_social_science_y1_sem1': {
+        'id': 'freshman_social_science_y1_sem1',
+        'category': 'freshman',
+        'label': 'Freshman Social Science - Year 1 Semester 1',
+        'priceCents': 30000,
+        'currency': 'ETB',
+        'entitlements': ['freshman_social_science_y1_sem1'],
+        'phrasePool': 'freshman',
+    },
+    'freshman_social_science_y1_sem2': {
+        'id': 'freshman_social_science_y1_sem2',
+        'category': 'freshman',
+        'label': 'Freshman Social Science - Year 1 Semester 2',
+        'priceCents': 30000,
+        'currency': 'ETB',
+        'entitlements': ['freshman_social_science_y1_sem2'],
+        'phrasePool': 'freshman',
+    },
+    'freshman_social_science_y1_full_year': {
+        'id': 'freshman_social_science_y1_full_year',
+        'category': 'freshman',
+        'label': 'Freshman Social Science - Year 1 Full Academic Year',
+        'priceCents': 50000,
+        'currency': 'ETB',
+        'entitlements': ['freshman_social_science_y1_sem1', 'freshman_social_science_y1_sem2'],
+        'phrasePool': 'freshman',
+    },
+
+    # University Computer Science (Year 2 example)
+    'university_computer_science_y2_sem1': {
+        'id': 'university_computer_science_y2_sem1',
+        'category': 'university',
+        'label': 'University Computer Science - Year 2 Semester 1',
+        'priceCents': 30000,
+        'currency': 'ETB',
+        'entitlements': ['university_computer_science_y2_sem1'],
+        'phrasePool': 'university-department',
+    },
+    'university_computer_science_y2_sem2': {
+        'id': 'university_computer_science_y2_sem2',
+        'category': 'university',
+        'label': 'University Computer Science - Year 2 Semester 2',
+        'priceCents': 30000,
+        'currency': 'ETB',
+        'entitlements': ['university_computer_science_y2_sem2'],
+        'phrasePool': 'university-department',
+    },
+    'university_computer_science_y2_full_year': {
+        'id': 'university_computer_science_y2_full_year',
+        'category': 'university',
+        'label': 'University Computer Science - Year 2 Full Academic Year',
+        'priceCents': 50000,
+        'currency': 'ETB',
+        'entitlements': ['university_computer_science_y2_sem1', 'university_computer_science_y2_sem2'],
+        'phrasePool': 'university-department',
+    },
+
+    # Generic University Department
+    'university-department': {
+        'id': 'university-department',
+        'category': 'university',
+        'label': 'University Department',
+        'priceCents': 30000,
+        'currency': 'ETB',
+        'entitlements': ['university-department'],
+        'phrasePool': 'university-department',
+    },
+    'euee-prep': {
+        'id': 'euee-prep',
+        'category': 'freshman',
+        'label': 'EUEE Prep',
+        'priceCents': 30000,
+        'currency': 'ETB',
+        'entitlements': ['euee-prep'],
+        'phrasePool': 'euee-prep',
+    },
+    'freshman': {
+        'id': 'freshman',
+        'category': 'freshman',
+        'label': 'Freshman',
+        'priceCents': 30000,
+        'currency': 'ETB',
+        'entitlements': ['freshman'],
+        'phrasePool': 'freshman',
+    },
+    'uat': {
+        'id': 'uat',
+        'category': 'freshman',
+        'label': 'UAT',
+        'priceCents': 30000,
+        'currency': 'ETB',
+        'entitlements': ['uat'],
+        'phrasePool': 'uat',
+    },
+    'exit-exam': {
+        'id': 'exit-exam',
+        'category': 'university',
+        'label': 'Exit Exam',
+        'priceCents': 30000,
+        'currency': 'ETB',
+        'entitlements': ['exit-exam'],
+        'phrasePool': 'exit-exam',
+    },
+
+    # COC Exam Category
+    'coc_medical': {
+        'id': 'coc_medical',
+        'category': 'coc',
+        'label': 'Medical COC Exam Preparation',
+        'priceCents': 40000,
+        'currency': 'ETB',
+        'entitlements': ['coc_medical'],
+        'phrasePool': 'exit-exam',
+    },
+    'coc_law': {
+        'id': 'coc_law',
+        'category': 'coc',
+        'label': 'Law COC Exam Preparation',
+        'priceCents': 40000,
+        'currency': 'ETB',
+        'entitlements': ['coc_law'],
+        'phrasePool': 'exit-exam',
+    },
+    'coc_engineering': {
+        'id': 'coc_engineering',
+        'category': 'coc',
+        'label': 'Engineering COC Exam Preparation',
+        'priceCents': 40000,
+        'currency': 'ETB',
+        'entitlements': ['coc_engineering'],
+        'phrasePool': 'exit-exam',
+    },
+}
+
+PURCHASES_FILE = _abs_path(os.environ.get('PURCHASES_FILE'), os.path.join(DATA_DIR, 'purchases.json'))
+PACKAGES_FILE = _abs_path(os.environ.get('PACKAGES_FILE'), os.path.join(DATA_DIR, 'packages.json'))
+
+def default_purchases_store():
+    return {'purchases': {}}
+
+def get_product_config(product_id):
+    if not product_id:
+        return None
+    product_id = str(product_id).strip()
+    if product_id in CANONICAL_PRODUCTS:
+        return copy.deepcopy(CANONICAL_PRODUCTS[product_id])
+    
+    # Generic format handling for university_{dept}_y{year}_{sem/full}
+    if product_id.startswith('university_'):
+        is_full = product_id.endswith('_full_year')
+        sem1 = product_id.replace('_full_year', '_sem1')
+        sem2 = product_id.replace('_full_year', '_sem2')
+        return {
+            'id': product_id,
+            'category': 'university',
+            'label': product_id.replace('_', ' ').title(),
+            'priceCents': 50000 if is_full else 30000,
+            'currency': 'ETB',
+            'entitlements': [sem1, sem2] if is_full else [product_id],
+            'phrasePool': 'university-department',
+        }
+    
+    # Fallback to load_packages
+    pkg = get_package_by_key(product_id)
+    if pkg:
+        return {
+            'id': pkg['key'],
+            'category': 'general',
+            'label': pkg['label'],
+            'priceCents': pkg['priceCents'],
+            'currency': pkg.get('currency', 'ETB'),
+            'entitlements': [pkg['key']],
+            'phrasePool': pkg.get('phrasePool', pkg['key']),
+        }
+    return None
+
+def get_product_price(product_id):
+    cfg = get_product_config(product_id)
+    return cfg['priceCents'] if cfg else 30000
+
+def get_product_entitlements(product_id):
+    cfg = get_product_config(product_id)
+    return cfg['entitlements'] if cfg else [product_id]
+
+# ---------------------------------------------------------------------------
+# Purchase References Storage & Management
+# ---------------------------------------------------------------------------
+
+def generate_purchase_reference():
+    chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
+    code = ''.join(secrets.choice(chars) for _ in range(5))
+    return 'TH-%s' % code
+
+def create_purchase_request(product_id, user_id=None, user_phone=None):
+    cfg = get_product_config(product_id)
+    if not cfg:
+        raise ValueError('Invalid product_id: %s' % product_id)
+    
+    ref = generate_purchase_reference()
+    now = utcnow()
+    purchase = {
+        'purchaseReference': ref,
+        'productId': cfg['id'],
+        'productLabel': cfg['label'],
+        'category': cfg['category'],
+        'priceCents': cfg['priceCents'],
+        'currency': cfg['currency'],
+        'entitlements': cfg['entitlements'],
+        'phrasePool': cfg['phrasePool'],
+        'userId': str(user_id) if user_id else None,
+        'userPhone': normalize_phone(user_phone) if user_phone else None,
+        'status': 'pending',
+        'createdAt': now,
+        'updatedAt': now,
+    }
+    def _mutate(data):
+        purchases = data.setdefault('purchases', {})
+        purchases[ref] = purchase
+        return purchase
+    mutate_json(PURCHASES_FILE, default_purchases_store(), _mutate)
+    return ref
+
+def get_purchase_by_reference(ref):
+    if not ref:
+        return None
+    ref = str(ref).strip().upper()
+    if not ref.startswith('TH-'):
+        ref = 'TH-' + ref.lstrip('-')
+    store = read_json(PURCHASES_FILE, default_purchases_store())
+    return (store.get('purchases') or {}).get(ref)
+
+def is_valid_purchase_reference_format(ref):
+    if not ref:
+        return False
+    ref = str(ref).strip().upper()
+    return bool(re.match(r'^(TH-)?[A-Z0-9]{4,8}$', ref))
+
+# ---------------------------------------------------------------------------
+# Packages & Dynamic Management
+# ---------------------------------------------------------------------------
+
+DEFAULT_PACKAGES = [
+    {'key': 'euee-prep', 'label': 'EUEE Prep', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'euee-prep'},
+    {'key': 'freshman', 'label': 'Freshman', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'freshman'},
+    {'key': 'uat', 'label': 'UAT', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'uat'},
+    {'key': 'university-department', 'label': 'University Department', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'university-department'},
+    {'key': 'exit-exam', 'label': 'Exit Exam', 'priceCents': 30000, 'currency': 'ETB', 'phrasePool': 'exit-exam'},
+]
+
+def default_packages_store():
+    return {'packages': copy.deepcopy(DEFAULT_PACKAGES)}
+
+def load_packages():
+    raw_env = os.environ.get('PACKAGES_JSON')
+    if raw_env:
+        try:
+            parsed = json.loads(raw_env)
+            if isinstance(parsed, list) and parsed:
+                return parsed
+        except ValueError:
+            pass
+
+    store = read_json(PACKAGES_FILE, default_packages_store())
+    packages = store.get('packages')
+    if not packages or not isinstance(packages, list):
+        return copy.deepcopy(DEFAULT_PACKAGES)
+    return packages
+
+def save_packages(packages_list):
+    def _mutate(data):
+        data['packages'] = packages_list
+        return True
+    mutate_json(PACKAGES_FILE, default_packages_store(), _mutate)
+
+def get_package_by_key(package_key):
+    cfg = get_product_config(package_key)
+    if cfg:
+        return {
+            'key': cfg['id'],
+            'label': cfg['label'],
+            'priceCents': cfg['priceCents'],
+            'currency': cfg['currency'],
+            'phrasePool': cfg['phrasePool'],
+        }
+    for pkg in load_packages():
+        if pkg['key'] == package_key:
+            return pkg
+    return None
+
+def format_money(cents, currency='ETB'):
+    return '%.2f %s' % (cents / 100, currency)
+
+# ---------------------------------------------------------------------------
+# Multilingual Support (5 Languages)
+# Languages: English, Amharic, Oromiffa, Somali, Tigrinya
+# ---------------------------------------------------------------------------
+
+LANGUAGES = {
+    'en': 'English 🇬🇧',
+    'am': 'አማርኛ 🇪🇹',
+    'om': 'Afaan Oromoo 🇪🇹',
+    'so': 'Af-Soomaali 🇸🇴',
+    'ti': 'ትግርኛ 🇪🇹',
+}
+
+MESSAGES = {
+    'en': {
+        'lang_select': 'Please select your preferred language:',
+        'start': 'Welcome to Temhiro Study App! Please choose a package to continue:',
+        'package_chosen': 'Package: %s\nPrice: %s\nPlease share your phone number using the button below:',
+        'share_phone_btn': '📱 Share Phone Number',
+        'invalid_phone': 'Please use the official "Share Phone Number" button below.',
+        'payment_method': 'How do you want to pay? Please select your payment method:',
+        'invalid_method': 'Invalid payment method. Please select using the buttons below.',
+        'ask_name': 'Great. What is your full name?',
+        'ask_link': 'Send the full transaction receipt link of your payment.\nFormat: %s',
+        'invalid_link': 'That link does not look like a valid %s receipt.\nExpected format: %s\nPlease send the full link again.',
+        'ask_txid': 'Now send your transaction ID / Ref Number.\nFormat: %s',
+        'invalid_txid': 'That transaction ID does not look valid for %s.\nExpected format: %s\nPlease try again.',
+        'submitted_pending': 'Thank you! Your payment details were submitted for review (Request ID: %s). You will receive your voucher code here after approval.',
+        'already_submitted': 'Your purchase is currently pending admin review. Send /myaccess to check your status.',
+        'already_approved': 'You already have an approved purchase (Request ID: %s). Send /myaccess to view your voucher code.',
+        'myaccess_redeemed': 'Your voucher was redeemed on %s.',
+        'myaccess_voucher': 'Your voucher for %s:\nPhrase: %s',
+        'no_voucher': 'No active voucher found. Use /start to select a package and subscribe.',
+        'cancelled': 'Operation cancelled. Send /start to begin again.',
+        'approved_msg': '🎉 *Your payment for %s has been approved!*\n\n📱 *Phone Number:*\n`%s` \n\n🔑 *Redeem Code:*\n`%s`\n\nTo redeem, open the Temhiro Study App and enter your phone number and redeem code.',
+        'copy_phone': '📱 %s',
+        'copy_code': '🔑 %s',
+        'btn_copy_phone': '📋 Copy Phone Number',
+        'btn_copy_code': '🔑 Copy Redeem Code',
+        'rejected_msg': '❌ Your payment request for %s was rejected by the admin (Request ID: %s). If you believe this is an error, please contact support.',
+        'approved_pending_pool': 'Your payment for %s was approved! Our support team is assigning your voucher phrase shortly (Request ID: %s).',
+    },
+    'am': {
+        'lang_select': 'እባክዎ የሚመርጡትን ቋንቋ ይምረጡ:',
+        'start': 'እንኳን ወደ ተምህሮ የጥናት መተግበሪያ በደህና መጡ! ለመቀጠል እባክዎ ፓኬጅ ይምረጡ:',
+        'package_chosen': 'ፓኬጅ: %s\nዋጋ: %s\nእባክዎ ከታች ያለውን ቁልፍ ተጠቅመው ስልክ ቁጥርዎን ያጋሩ:',
+        'share_phone_btn': '📱 ስልክ ቁጥር ያጋሩ',
+        'invalid_phone': 'እባክዎ ከታች ያለውን ይፋዊ "ስልክ ቁጥር ያጋሩ" ቁልፍ ይጠቀሙ።',
+        'payment_method': 'እንዴት መክፈል ይፈልጋሉ? እባክዎ የክፍያ መንገድ ይምረጡ:',
+        'invalid_method': 'የተሳሳተ የክፍያ መንገድ። እባክዎ ከታች ያሉትን ቁልፎች ይጠቀሙ።',
+        'ask_name': 'በጣም ጥሩ። ሙሉ ስምዎን ያስገቡ:',
+        'ask_link': 'የክፍያዎን ደረሰኝ ሙሉ ሊንክ ይላኩ።\nቅርጸት: %s',
+        'invalid_link': 'የላኩት ሊንክ የ %s ደረሰኝ አይመስልም።\nየሚጠበቀው ቅርጸት: %s\nእባክዎ ሙሉውን ሊንክ እንደገና ይላኩ።',
+        'ask_txid': 'አሁን የግብይት መለያ ቁጥርዎን (Transaction ID / Ref Number) ይላኩ።\nቅርጸት: %s',
+        'invalid_txid': 'ያስገቡት የግብይት መለያ ቁጥር ለ %s ትክክለኛ አይመስልም።\nየሚጠበቀው ቅርጸት: %s\nእባክዎ እንደገና ይሞክሩ።',
+        'submitted_pending': 'እናመሰግናለን! የክፍያ ዝርዝርዎ ለግምገማ ቀርቧል (ጥያቄ መለያ: %s)። ሲጸድቅ የመቤዠያ ኮድዎን እዚሁ ይደርስዎታል።',
+        'already_submitted': 'ግዢዎ በአስተዳዳሪው እየተገመገመ ነው። ሁኔታዎን ለማየት /myaccess ይላኩ።',
+        'already_approved': 'ቀደም ሲል የጸደቀ ግዢ አለዎት (ጥያቄ መለያ: %s)። የመቤዠያ ኮድዎን ለማየት /myaccess ይላኩ።',
+        'myaccess_redeemed': 'የመቤዠያ ኮድዎ በ %s ተወስዷል።',
+        'myaccess_voucher': 'ለ %s የመቤዠያ ኮድዎ:\nኮድ: %s',
+        'no_voucher': 'ምንም ንቁ የመቤዠያ ኮድ አልተገኘም። ፓኬጅ ለመምረጥ እና ለመመዝገብ /start ይላኩ።',
+        'cancelled': 'ሂደቱ ተሰርዟል። እንደገና ለመጀመር /start ይላኩ።',
+        'approved_msg': '🎉 *ለ %s ያደረጉት ክፍያ ጸድቋል!*\n\n📱 *ስልክ ቁጥር:*\n`%s`\n\n🔑 *የመቤዠያ ኮድ:*\n`%s`\n\nለመጠቀም፡ የተምህሮ መተግበሪያን በመክፈት ስልክ ቁጥርዎን እና የመቤዠያ ኮድዎን ያስገቡ።',
+        'copy_phone': '📱 %s',
+        'copy_code': '🔑 %s',
+        'btn_copy_phone': '📋 ስልክ ቁጥር ኮፒ ያድርጉ',
+        'btn_copy_code': '🔑 የመቤዠያ ኮድ ኮፒ ያድርጉ',
+        'rejected_msg': '❌ ለ %s ያቀረቡት የክፍያ ጥያቄ በአስተዳዳሪው ውድቅ ተደርጓል (ጥያቄ መለያ: %s)። ስህተት ነው ብለው ካመኑ እባክዎ ድጋፍ ሰጪውን ያነጋግሩ።',
+        'approved_pending_pool': 'ለ %s ያደረጉት ክፍያ ጸድቋል! የድጋፍ ቡድናችን የመቤዠያ ኮድዎን በቅርቡ ይልካል (ጥያቄ መለያ: %s)።',
+    },
+    'om': {
+        'lang_select': 'Maaloo afaan filattan ይምረጡ:',
+        'start': 'Baga gara Application Barnoota Temhiro nagaan dhuftan! Maaloo itti fufuuf paakeejii filadhaa:',
+        'package_chosen': 'Paakeejii: %s\nGatiisaa: %s\nMallaattoo gadii fayyadamuun lakkoofsa bilbila keessani qoodaa:',
+        'share_phone_btn': '📱 Lakkoofsa Bilbilaa Qoodaa',
+        'invalid_phone': 'Maaloo mallaattoo seeraa "Lakkoofsa Bilbilaa Qoodaa" jedhu gadii fayyadamaa.',
+        'payment_method': 'Akkaamitti kafaluu meedhu? Maaloo mala kafaltii keessani filadhaa:',
+        'invalid_method': 'Mali kafaltii dogoggoraa. Maaloo mallaattoowwan gadii fayyadamuun filadhaa.',
+        'ask_name': 'Baye\'ee gaarii. Maqaa keessani guutuu galchaa:',
+        'ask_link': 'Linkii risiitii kafaltii keessinii guutuu ergaa.\nBifa: %s',
+        'invalid_link': 'Linkiin sun risiitii %s sirrii hin fakkaatu.\nBifa eegamu: %s\nMaaloo linkii guutuu ammas ergaa.',
+        'ask_txid': 'Aamma lakkoofsa kaffaltii (Transaction ID / Ref Number) ergaa.\nBifa: %s',
+        'invalid_txid': 'Lakkoofsi kaffaltii sun %s kuf sirrii hin fakkaatu.\nBifa eegamu: %s\nMaaloo ammas yaalaa.',
+        'submitted_pending': 'Galatoomaa! Odeeffannoon kafaltii keessanii madaalliif dhihaateera (ID Gaaffii: %s). Yeroo mirkanaa\'u koodii fayyadamaa asitti ni argattu.',
+        'already_submitted': 'Bitani keessani amma gulaaltuun irratti hojjechaa jira. Haala keessan ilaaluuf /myaccess ergaa.',
+        'already_approved': 'Kafaltii mirkanaa\'e qabdu (ID Gaaffii: %s). Koodii keessan ilaaluuf /myaccess ergaa.',
+        'myaccess_redeemed': 'Koodiin keessani Guyyaa %s irratti fudhatameera.',
+        'myaccess_voucher': 'Koodii kaffaltii %s keessan:\nJecha Koodii: %s',
+        'no_voucher': 'Koodiin hojii irratti jiru hin argamne. Paakeejii filachuufi galmaa\'uuf /start ergaa.',
+        'cancelled': 'Adeemsi dhiikfameera. Irra deebitanii jalqabuuf /start ergaa.',
+        'approved_msg': '🎉 *Kafaltiin keessan %s faana mirkanaa\'eera!*\n\n📱 *Lakkoofsa Bilbilaa:*\n`%s`\n\n🔑 *Koodii Fayyadamaa:*\n`%s`\n\nFayyadamuuf: Appii Temhiro Banuudhaan Lakkoofsa Bilbilaa fi Koodii keessani galchaa.',
+        'copy_phone': '📱 %s',
+        'copy_code': '🔑 %s',
+        'btn_copy_phone': '📋 Lakkoofsa Bilbilaa Waraabi',
+        'btn_copy_code': '🔑 Koodii Fayyadamaa Waraabi',
+        'rejected_msg': '❌ Kaffaltiin %s irraatti dhihaate gulaalaan kufaa ta\'eera (ID Gaaffii: %s). Dogoggora jadhanii yoo yaaddu deeggarsa qunnamaa.',
+        'approved_pending_pool': 'Kafaltiin keessan %s faana mirkanaa\'eera! Gareen deeggarsaa keenya dhiyootti koodii ergaa (ID Gaaffii: %s).',
+    },
+    'so': {
+        'lang_select': 'Fadlan dooro luqadda aad doorbideyso:',
+        'start': 'Ku soo dhowaw App-ka Waxbarashada ee Temhiro! Fadlan dooro xزمة (package) si aad u jarayso:',
+        'package_chosen': 'Xزمة: %s\nQiimaha: %s\nFadlan la wadaag nambarkaaga telefonka adigoo kullanaya batoonka hoose:',
+        'share_phone_btn': '📱 La Wadaag Nambarka Telefonka',
+        'invalid_phone': 'Fadlan isticmaal batoonka rasmiga ah ee "La Wadaag Nambarka Telefonka" ee hoose.',
+        'payment_method': 'Sidaad u rabtaa inaad u bixiso? Fadlan dooro habka lacag bixinta:',
+        'invalid_method': 'Habka lacag bixinta ee saxda ahayn. Fadlan dooro adigoo isticmaalaya batoonada hoose.',
+        'ask_name': 'Aad uga wanaagsan. Waa maxay magacaaga buuxa?',
+        'ask_link': 'Soo dir xiriirka (link) rasiidka lacag bixinta buuxa.\nHabka: %s',
+        'invalid_link': 'Xiriirkaasi ma u muuqdo rasiidh %s oo sax ah.\nHabka la filayo: %s\nFadlan soo dir xiriirka buuxa markale.',
+        'ask_txid': 'Hada soo dir ID-ga maamulka / Nambarka tixraaca (Ref Number).\nHabka: %s',
+        'invalid_txid': 'ID-ga maamulkaasi ma u muuqdo mid sax ah %s.\nHabka la filayo: %s\nFadlan dib u doondoon marka kale.',
+        'submitted_pending': 'Waad mahadsan tahay! Faahfaahinta lacag bixintaada waxaa loo gudbiyay dib u eegis (ID Request: %s). Waxaad heli doontaa koodka voucher-kaaga halkan marka la ansixiyo.',
+        'already_submitted': 'Raskaga bixinta wuxuu hadda ku jiraa dib u eegis maamule. Soo dir /myaccess si aad u eegto xaaladdaada.',
+        'already_approved': 'Waxaad horay u leedahay rasiidh la ansixiyay (ID Request: %s). Soo dir /myaccess si aad u eegto koodka voucher-kaaga.',
+        'myaccess_redeemed': 'Voucher-kaaga waxaa la furay %s.',
+        'myaccess_voucher': 'Voucher-kaaga %s:\nErayga: %s',
+        'no_voucher': 'Laguma helin voucher firfircoon. Isticmaal /start si aad u doorato xزمة una isdhaafiso.',
+        'cancelled': 'Hawshii waa la baabi\'iyay. Soo dir /start si aad dib ugu start gareyso.',
+        'approved_msg': '🎉 *Lacag bixintaada ee %s waa la ansixiyay!*\n\n📱 *Nambarka Telefonka:*\n`%s`\n\n🔑 *Koodka Voucher-ka:*\n`%s`\n\nSi aad u furato, fur Temhiro Study App oo geli nambarkaaga telefonka iyo koodka voucher-ka.',
+        'copy_phone': '📱 %s',
+        'copy_code': '🔑 %s',
+        'btn_copy_phone': '📋 Koobi Garayso Nambarka Telefonka',
+        'btn_copy_code': '🔑 Koobi Garayso Koodka Voucher-ka',
+        'rejected_msg': '❌ Codsigaaga lacag bixinta ee %s waxaa soo diiday maamulaha (ID Request: %s). Haddii aad u meel dhagaxdo in tani tahay qalad, fadlan la xiriir taageerada.',
+        'approved_pending_pool': 'Lacag bixintaada ee %s waa la ansixiyay! Kooxda taageerada waxay kuu soo diri doonaan koodka voucher-ka dhowaan (ID Request: %s).',
+    },
+    'ti': {
+        'lang_select': 'በጃኹም ዝመርጽዎ ቋንቋ ይረዩ:',
+        'start': 'እንካዕ ናብ ናይ ተምህሮ መጽናዕቲ መተግበሪ ብደሓን መጻእኹም! ንምቕጻል በጃኹም ፓኬጅ ይረዩ:',
+        'package_chosen': 'ፓኬጅ: %s\nዋጋ: %s\nበጃኹም ኣብ ታሕቲ ዘሎ መላገቢ ብምጥቃም ቁጽሪ ስልኽኩም ኣካፍሉ:',
+        'share_phone_btn': '📱 ቁጽሪ ስልኺ ኣካፍል',
+        'invalid_phone': 'በጃኹም ኣብ ታሕቲ ዘሎ ወግዓዊ "ቁጽሪ ስልኺ ኣካፍል" መላገቢ ይጠቀሙ።',
+        'payment_method': 'ብኸመይ ክትከፍሉ ትደልዩ? በጃኹም ናይ ክፍሊት መንገዲ ይረዩ:',
+        'invalid_method': 'ጌጋ ናይ ክፍሊት መንገዲ። በጃኹም ኣብ ታሕቲ ዘለው መላገቢታት ብምጥቃም ይረዩ።',
+        'ask_name': 'ብጣዕሚ ጽቡቕ። ምሉእ ስምኩም የእትዉ:',
+        'ask_link': 'ምሉእ ናይ ክፍሊትኩም ደረሰኝ ሊንክ ይላኹ።\nቅዲ: %s',
+        'invalid_link': 'እቲ ዝላኣኽክምዎ ሊንክ ናይ %s ደረሰኝ ኣይመስልን።\nዝድለ ቅዲ: %s\nበጃኹም ምሉእ ሊንክ እንደገና ይላኹ።',
+        'ask_txid': 'ሕዚ ናይ መለለዪ ቁጽሪ ክፍሊትኩም (Transaction ID / Ref Number) ይላኹ።\nቅዲ: %s',
+        'invalid_txid': 'እቲ ዘእተወክምዎ ናይ መለለዪ ቁጽሪ ክፍሊት ን %s ትክክለኛ ኣይመስልን።\nዝድለ ቅዲ: %s\nበጃኹም እንደገና ይሞክሩ።',
+        'submitted_pending': 'የቐንየልና! ናይ ክፍሊት ዝርዝርኩም ንግምገማ ቐሪቡ ኣሎ (ጥያቄ መለያ: %s)። ምስ ጸደቐ ናይ መቤዠያ ኮድኩም ኣብዚ ክበጽሓኩም እዩ።',
+        'already_submitted': 'ዓደግቲክም ብኣካየዲ ይግምገም ኣሎ። ኩነታትኩም ንምርኣይ /myaccess ይላኹ።',
+        'already_approved': 'ኣቐዲሙ ዝጸደቐ ዓደግቲ ኣለኩም (ጥያቄ መለያ: %s)። ናይ መቤዠያ ኮድኩም ንምርኣይ /myaccess ይላኹ።',
+        'myaccess_redeemed': 'ናይ መቤዠያ ኮድኩም ኣብ %s ተወሲዱ እዩ።',
+        'myaccess_voucher': 'ናይ %s መቤዠያ ኮድኩም:\nኮድ: %s',
+        'no_voucher': 'ዝኾነ ንጡፍ ናይ መቤዠያ ኮድ ኣይተረኸበን። ፓኬጅ ንምምራፅን ንምምዝጋብን /start ይላኹ።',
+        'cancelled': 'እቲ መስርሕ ተሰሪዙ እዩ። እንደገና ንምጅማር /start ይላኹ።',
+        'approved_msg': '🎉 *ናይ %s ክፍሊትኩም ጸድቑ ኣሎ!*\n\n📱 *ቁጽሪ ስልኺ:*\n`%s`\n\n🔑 *ናይ መቤዠያ ኮድ:*\n`%s`\n\nንምጥቃም፡ ናይ ተምህሮ መተግበሪ ብምክፋት ቁጽሪ ስልኽኩምን ናይ መቤዠያ ኮድኩምን የእትዉ።',
+        'copy_phone': '📱 %s',
+        'copy_code': '🔑 %s',
+        'btn_copy_phone': '📋 ቁጽሪ ስልኺ ኮፒ ግበሩ',
+        'btn_copy_code': '🔑 ናይ መቤዠያ ኮድ ኮፒ ግበሩ',
+        'rejected_msg': '❌ ን %s ዝኣቐረብክምዎ ናይ ክፍሊት ሕቶ ብኣካየዲ ውድቂ ኾይኑ ኣሎ (ጥያቄ መለያ: %s)። ጌጋ እዩ ኢልኩም እንተኣሚንኩም በጃኹም ናይ ደጋፊ ኣገልግሎት ኣነጋግሩ።',
+        'approved_pending_pool': 'ናይ %s ክፍሊትኩም ጸድቑ ኣሎ! ናይ ደጋፊ ቡድና ኣብ ቐረባ እዋን ናይ መቤዠያ ኮድኩም ክልእኽ እዩ (ጥያቄ መለያ: %s)።',
+    },
+}
+
+def get_user_lang(user_id):
+    data = read_json(USERS_FILE, default_users())
+    user_info = (data.get('users') or {}).get(str(user_id)) or {}
+    return user_info.get('language') or 'en'
+
+def set_user_lang(user_id, lang_code):
+    def _mutate(data):
+        users = data.setdefault('users', {})
+        user_entry = users.setdefault(str(user_id), {'id': user_id})
+        user_entry['language'] = lang_code
+        return True
+    mutate_json(USERS_FILE, default_users(), _mutate)
+
+def get_msg(user_id, key, *args):
+    lang = get_user_lang(user_id)
+    text = MESSAGES.get(lang, MESSAGES['en']).get(key) or MESSAGES['en'].get(key, '')
+    if args:
+        try:
+            return text % args
+        except Exception:
+            return text
+    return text
+
+def build_language_keyboard():
+    rows = []
+    keys = list(LANGUAGES.keys())
+    for i in range(0, len(keys), 2):
+        row = [{'text': LANGUAGES[k], 'callback_data': 'lang:%s' % k} for k in keys[i:i+2]]
+        rows.append(row)
+    return {'inline_keyboard': rows}
+
+def build_package_keyboard():
+    rows = [[
+        {'text': '%s - %s' % (pkg['label'], format_money(pkg['priceCents'], pkg['currency'])),
+         'callback_data': 'package:%s' % pkg['key']}
+    ] for pkg in load_packages()]
+    return {'inline_keyboard': rows}
+
+def build_phone_share_keyboard(user_id=None):
+    btn_text = get_msg(user_id, 'share_phone_btn') if user_id else '📱 Share Phone Number'
+    return {
+        'keyboard': [[{'text': btn_text, 'request_contact': True}]],
+        'resize_keyboard': True,
+        'one_time_keyboard': True,
+    }
+
+def get_start_message(user_id=None):
+    return get_msg(user_id, 'start') if user_id else MESSAGES['en']['start']
+
+# ---------------------------------------------------------------------------
+# Message Builders
+# ---------------------------------------------------------------------------
 
 def build_request_message(request):
     user = request.get('user') or {}
@@ -593,56 +1127,40 @@ def build_request_message(request):
     phone_verified = ' (verified)' if phone.get('verified') else ' (unverified)'
     full_name = ('%s %s' % (user.get('firstName') or '', user.get('lastName') or '')).strip()
     return '\n'.join([
-        'New access request pending review:',
-        'Request ID: %s' % request.get('requestId'),
+        '📌 *New Access Request Pending Review*',
+        'Request ID: `%s`' % request.get('requestId'),
         'Package: %s (%s)' % (request.get('packageLabel'), format_money(request.get('priceCents'), request.get('currency'))),
         'Payment Method: %s' % (request.get('paymentMethodLabel') or request.get('paymentMethod') or 'N/A'),
         'User: %s' % full_name,
-        'Telegram: @%s (%s)' % (user.get('username') or 'no_username', user.get('id')),
-        'Phone: %s%s' % (phone_text, phone_verified),
-        'Transaction ID: %s' % request.get('transactionId'),
+        'Telegram: @%s (`%s`)' % (user.get('username') or 'no_username', user.get('id')),
+        'Phone: `%s`%s' % (phone_text, phone_verified),
+        'Transaction ID: `%s`' % request.get('transactionId'),
         'Transaction Link: %s' % request.get('transactionLink'),
         '',
         'Approve this request only after verifying the payment.',
     ])
 
-
 def build_pending_message(request):
-    return '\n'.join([
-        'Your payment details were submitted.',
-        'Request ID: %s' % request.get('requestId'),
-        'I sent it to the admin for verification.',
-        'You will get your voucher phrase after approval.',
-    ])
-
+    user_id = request.get('userId')
+    return get_msg(user_id, 'submitted_pending', request.get('requestId'))
 
 def build_approved_pending_voucher_message(request):
-    return '\n'.join([
-        'Your payment was approved.',
-        'Our support team is assigning your voucher.',
-        'You will receive your voucher phrase in this chat shortly.',
-        'Request ID: %s' % request.get('requestId'),
-    ])
-
+    user_id = request.get('userId')
+    return get_msg(user_id, 'approved_pending_pool', request.get('packageLabel'), request.get('requestId'))
 
 def build_rejected_message(request):
-    return '\n'.join([
-        'Your payment was not approved.',
-        'The admin could not verify the payment details.',
-        'If you believe this is a mistake, submit a new request with /buy.',
-        'Request ID: %s' % request.get('requestId'),
-    ])
+    user_id = request.get('userId')
+    return get_msg(user_id, 'rejected_msg', request.get('packageLabel'), request.get('requestId'))
 
-
-def build_approved_message(package_label, voucher_phrase):
-    return '\n'.join([
-        'Payment approved. Your Tinat voucher phrase is below:',
-        'Package: %s' % package_label,
-        'Phrase: %s' % voucher_phrase,
-        '',
-        'Keep this phrase safe. If you lose it, send /myaccess in this bot.',
-    ])
-
+def build_approved_message(package_label, voucher_phrase, user_id=None, phone_number=None):
+    text = get_msg(user_id, 'approved_msg', package_label, phone_number or 'N/A', voucher_phrase)
+    keyboard = {
+        'inline_keyboard': [
+            [{'text': get_msg(user_id, 'btn_copy_phone'), 'callback_data': 'copy_phone:%s' % (phone_number or '')}],
+            [{'text': get_msg(user_id, 'btn_copy_code'), 'callback_data': 'copy_code:%s' % voucher_phrase}],
+        ]
+    }
+    return text, keyboard
 
 def build_pending_assignment_message(pending):
     lines = ['Approved purchases waiting for voucher assignment:']
@@ -658,14 +1176,13 @@ def build_pending_assignment_message(pending):
                         user.get('username') or 'no_username', phone, verified))
     return '\n'.join(lines)
 
-
 def notify_admin(request):
     if not ADMIN_CHAT_ID:
         raise RuntimeError('Missing ADMIN_CHAT_ID in environment')
-    send_message(ADMIN_CHAT_ID, build_request_message(request), reply_markup={
+    send_message(ADMIN_CHAT_ID, build_request_message(request), parse_mode='Markdown', reply_markup={
         'inline_keyboard': [[
-            {'text': 'Approve', 'callback_data': 'approve:%s' % request['requestId']},
-            {'text': 'Reject', 'callback_data': 'reject:%s' % request['requestId']},
+            {'text': '✅ Approve', 'callback_data': 'approve:%s' % request['requestId']},
+            {'text': '❌ Reject', 'callback_data': 'reject:%s' % request['requestId']},
         ]]
     })
 
@@ -1179,13 +1696,16 @@ def activate_voucher(phone, phrase):
         entry['redeemedByPhone'] = phone_digits
         entry['activatedBy'] = 'android'
 
+        pkg_key = entry.get('packageKey')
+        entitlements = get_product_entitlements(pkg_key)
         entitlement = {
             'entitlementId': random_id(16),
             'ownerId': str(entry.get('ownerId') or (request or {}).get('userId') or ''),
             'phone': phone_digits,
             'phrase': entry.get('phrase'),
-            'packageKey': entry.get('packageKey'),
+            'packageKey': pkg_key,
             'packageLabel': entry.get('packageLabel'),
+            'entitlements': entitlements,
             'assignedAt': entry.get('assignedAt'),
             'redeemedAt': entry['redeemedAt'],
             'activatedBy': 'android',
@@ -1438,6 +1958,7 @@ def _new_draft(user_id):
         'userId': str(user_id),
         'step': 'package',
         'package': None,
+        'purchaseReference': None,
         'phone': None,
         'method': None,
         'name': None,
@@ -1473,14 +1994,7 @@ def _latest_request_for_user(requests, user_id):
 
 
 def _submit(data, user_id, draft):
-    """Create (or look up) the request for a user from their finished draft.
-
-    Returns the request. An active request (pending / approved / waiting for
-    voucher) is returned unchanged, and a delivered request for the same
-    package blocks a repeat purchase. A delivered request for a different
-    package allows a new purchase. A rejected request is marked 'superseded'
-    and a fresh one is created so the user can try again. Requests are stored
-    keyed by requestId so a user can hold more than one."""
+    """Create (or look up) the request for a user from their finished draft."""
     requests = data.setdefault('requests', {})
     existing = _latest_request_for_user(requests, user_id)
     if existing:
@@ -1498,6 +2012,7 @@ def _submit(data, user_id, draft):
     phone = draft.get('phone') or {}
     request = _new_request(user_id, profile, package, phone)
     request.update({
+        'purchaseReference': draft.get('purchaseReference'),
         'paymentMethod': draft.get('method'),
         'paymentMethodLabel': (get_payment_method(draft.get('method')) or {}).get('label'),
         'name': draft.get('name'),
@@ -1507,6 +2022,19 @@ def _submit(data, user_id, draft):
         'updatedAt': utcnow(),
     })
     requests[str(request['requestId'])] = request
+    
+    # Mark associated purchase request as submitted
+    ref = draft.get('purchaseReference')
+    if ref:
+        def _update_p(p_data):
+            p = (p_data.get('purchases') or {}).get(ref)
+            if p:
+                p['status'] = 'submitted'
+                p['updatedAt'] = utcnow()
+                p['telegramUserId'] = str(user_id)
+            return True
+        mutate_json(PURCHASES_FILE, default_purchases_store(), _update_p)
+
     return request
 
 
@@ -1522,60 +2050,100 @@ def handle_draft_step(user, text):
     step = draft.get('step')
     message = None
     reply_markup = None
+    clean_text = str(text or '').strip()
+
+    # Purchase Reference Lookup check if text looks like TH-XXXXX
+    if is_valid_purchase_reference_format(clean_text) and (step in ('package', 'reference') or clean_text.upper().startswith('TH-')):
+        ref_data = get_purchase_by_reference(clean_text)
+        if not ref_data:
+            return draft, get_msg(user_id, 'invalid_ref'), None
+        if ref_data.get('status') in ('redeemed', 'delivered'):
+            return draft, get_msg(user_id, 'already_redeemed_ref'), None
+
+        # Lock in package and reference
+        product_id = ref_data.get('productId')
+        package = get_package_by_key(product_id) or {
+            'key': product_id,
+            'label': ref_data.get('productLabel'),
+            'priceCents': ref_data.get('priceCents'),
+            'currency': ref_data.get('currency', 'ETB'),
+            'phrasePool': ref_data.get('phrasePool', 'freshman'),
+        }
+
+        entitlements_str = '\n'.join(['✓ %s' % e.replace('_', ' ').title() for e in ref_data.get('entitlements', [product_id])])
+        draft.update({
+            'package': package['key'],
+            'purchaseReference': ref_data['purchaseReference'],
+            'step': 'ref_confirm',
+            'updatedAt': utcnow(),
+        })
+        _save_draft(user_id, draft)
+
+        message = get_msg(
+            user_id, 'ref_summary',
+            package['label'],
+            format_money(package['priceCents'], package['currency']),
+            entitlements_str
+        )
+        reply_markup = {
+            'inline_keyboard': [[
+                {'text': get_msg(user_id, 'btn_confirm_ref'), 'callback_data': 'confirm_ref:%s' % ref_data['purchaseReference']},
+                {'text': get_msg(user_id, 'btn_cancel_ref'), 'callback_data': 'cancel_ref'},
+            ]]
+        }
+        return draft, message, reply_markup
+
+    if step == 'ref_confirm' and clean_text.startswith('confirm_ref:'):
+        ref = clean_text.split(':', 1)[1]
+        draft.update({'step': 'phone', 'updatedAt': utcnow()})
+        _save_draft(user_id, draft)
+        message = get_msg(user_id, 'package_chosen', draft.get('package'), format_money(get_product_price(draft.get('package'))))
+        reply_markup = build_phone_share_keyboard(user_id)
+        return draft, message, reply_markup
 
     if step == 'package':
         package = get_package_by_key(text)
         if not package:
-            return draft, get_package_selection_message(), build_package_keyboard()
+            return draft, get_start_message(user_id), build_package_keyboard()
         draft.update({'package': package['key'], 'step': 'phone', 'updatedAt': utcnow()})
         _save_draft(user_id, draft)
-        message = ('Package: %s\n'
-                   'Price: %s\n'
-                   'Now share your phone number using the button below.')
-        message = message % (package['label'], format_money(package['priceCents'], package['currency']))
-        reply_markup = build_phone_share_keyboard()
+        message = get_msg(user_id, 'package_chosen', package['label'], format_money(package['priceCents'], package['currency']))
+        reply_markup = build_phone_share_keyboard(user_id)
 
     elif step == 'phone':
         draft.update({'phone': {'number': text, 'verified': False}, 'step': 'method', 'updatedAt': utcnow()})
         _save_draft(user_id, draft)
-        message = 'How do you want to pay?'
+        message = get_msg(user_id, 'payment_method')
         reply_markup = build_payment_method_keyboard()
 
     elif step == 'method':
         method = get_payment_method(text)
         if not method:
-            message = 'Invalid payment method. Use a button below.'
+            message = get_msg(user_id, 'invalid_method')
             reply_markup = build_payment_method_keyboard()
             return draft, message, reply_markup
         draft.update({'method': method['key'], 'step': 'name', 'updatedAt': utcnow()})
         _save_draft(user_id, draft)
-        message = 'Great. What is your full name?'
+        message = get_msg(user_id, 'ask_name')
 
     elif step == 'name':
         draft.update({'name': text.strip(), 'step': 'link', 'updatedAt': utcnow()})
         _save_draft(user_id, draft)
-        message = ('Send the full transaction link of your payment.\n'
-                   'Format: %s') % link_format_hint(draft.get('method'))
+        message = get_msg(user_id, 'ask_link', link_format_hint(draft.get('method')))
 
     elif step == 'link':
         method = draft.get('method')
         if not is_valid_transaction_link(method, text):
-            message = ('That link does not look like a %s receipt.\n'
-                       'Expected format: %s\n'
-                       'Send the full link again.') % (get_payment_method(method)['label'],
-                                                       link_format_hint(method))
+            message = get_msg(user_id, 'invalid_link', get_payment_method(method)['label'], link_format_hint(method))
             return draft, message, None
         draft.update({'link': text.strip(), 'step': 'txid', 'updatedAt': utcnow()})
         _save_draft(user_id, draft)
-        message = ('Now send your transaction ID.\n'
-                   'Format: %s') % id_format_hint(method)
+        message = get_msg(user_id, 'ask_txid', id_format_hint(method))
 
     elif step == 'txid':
         method = draft.get('method')
         if not is_valid_transaction_id(method, text):
-            message = ('That transaction ID does not look valid for %s.\n'
-                       'It should %s.\n'
-                       'Try again.') % (get_payment_method(method)['label'], id_format_hint(method))
+            message = get_msg(user_id, 'invalid_txid', get_payment_method(method)['label'], id_format_hint(method))
             return draft, message, None
         draft.update({'txid': text.strip(), 'step': 'done', 'updatedAt': utcnow()})
         _save_draft(user_id, draft)
@@ -1585,12 +2153,8 @@ def handle_draft_step(user, text):
 
 
 def build_already_approved_message(request):
-    lines = [
-        'You already have an approved purchase.',
-        'Request ID: %s' % request.get('requestId'),
-        'Your voucher phrase was already sent in this chat. Send /myaccess to see it again.',
-    ]
-    return '\n'.join(lines)
+    user_id = request.get('userId')
+    return get_msg(user_id, 'already_approved', request.get('requestId'))
 
 
 def submit_request(user_id, draft):
@@ -1738,6 +2302,102 @@ def handle_message(update):
         send_pending_summary(user or {'id': chat_id})
         return True
 
+    if is_admin(chat_id):
+        if text == '/admin' or text == '/packages':
+            pkgs = load_packages()
+            lines = ['🛠 *Admin Package Management*', '']
+            lines.append('Active Packages:')
+            for idx, p in enumerate(pkgs, 1):
+                lines.append('%d. *%s* (`%s`) - %s ETB' % (idx, p['label'], p['key'], p['priceCents']/100.0))
+            lines.append('')
+            lines.append('*Commands:*')
+            lines.append('• `/addpackage <key> | <label> | <price_etb>`')
+            lines.append('• `/editprice <key> <price_etb>`')
+            lines.append('• `/deletepackage <key>`')
+            lines.append('• `/addvouchers <pool_key> <code1> <code2> ...`')
+            send_message(chat_id, '\n'.join(lines), parse_mode='Markdown')
+            return True
+
+        if text.startswith('/addpackage '):
+            raw = text.split(' ', 1)[1].strip()
+            parts = [p.strip() for p in raw.split('|')]
+            if len(parts) < 3:
+                send_message(chat_id, 'Usage: `/addpackage <key> | <label> | <price_etb>`', parse_mode='Markdown')
+                return True
+            key, label, price_str = parts[0], parts[1], parts[2]
+            try:
+                price_cents = int(float(price_str) * 100)
+            except ValueError:
+                send_message(chat_id, 'Invalid price amount.')
+                return True
+            pkgs = load_packages()
+            pkgs = [p for p in pkgs if p['key'] != key]
+            pkgs.append({
+                'key': key,
+                'label': label,
+                'priceCents': price_cents,
+                'currency': 'ETB',
+                'phrasePool': key,
+            })
+            save_packages(pkgs)
+            send_message(chat_id, '✅ Package *%s* added/updated successfully.' % label, parse_mode='Markdown')
+            return True
+
+        if text.startswith('/editprice '):
+            parts = text.split(' ')
+            if len(parts) < 3:
+                send_message(chat_id, 'Usage: `/editprice <key> <price_etb>`', parse_mode='Markdown')
+                return True
+            key, price_str = parts[1].strip(), parts[2].strip()
+            try:
+                price_cents = int(float(price_str) * 100)
+            except ValueError:
+                send_message(chat_id, 'Invalid price amount.')
+                return True
+            pkgs = load_packages()
+            found = False
+            for p in pkgs:
+                if p['key'] == key:
+                    p['priceCents'] = price_cents
+                    found = True
+                    break
+            if found:
+                save_packages(pkgs)
+                send_message(chat_id, '✅ Price for package *%s* updated to %s ETB.' % (key, price_str), parse_mode='Markdown')
+            else:
+                send_message(chat_id, 'Package key not found.')
+            return True
+
+        if text.startswith('/deletepackage '):
+            key = text.split(' ', 1)[1].strip()
+            pkgs = load_packages()
+            new_pkgs = [p for p in pkgs if p['key'] != key]
+            if len(new_pkgs) < len(pkgs):
+                save_packages(new_pkgs)
+                send_message(chat_id, '✅ Package *%s* deleted.' % key, parse_mode='Markdown')
+            else:
+                send_message(chat_id, 'Package key not found.')
+            return True
+
+        if text.startswith('/addvouchers '):
+            parts = text.split(' ')
+            if len(parts) < 3:
+                send_message(chat_id, 'Usage: `/addvouchers <pool_key> <code1> <code2> ...`', parse_mode='Markdown')
+                return True
+            pool_key = parts[1].strip()
+            codes = [c.strip() for c in parts[2:] if c.strip()]
+            def _mutate_vouchers(data):
+                pkgs_store = data.setdefault('packages', {})
+                pool_store = pkgs_store.setdefault(pool_key, {'phrases': [], 'issued': {}})
+                phrases = pool_store.setdefault('phrases', [])
+                for code in codes:
+                    if code not in phrases:
+                        phrases.append(code)
+                return len(codes)
+            count = mutate_json(VOUCHERS_FILE, default_vouchers(), _mutate_vouchers)
+            send_message(chat_id, '✅ Added %d voucher(s) to pool *%s*.' % (count, pool_key), parse_mode='Markdown')
+            return True
+
     if text.startswith('/revokeaccess ') and is_admin(chat_id):
         token = text.split(' ', 1)[1].strip()
         if revoke_access_token(token):
@@ -1755,7 +2415,7 @@ def handle_message(update):
         return True
 
     if text in ('/start', '/buy'):
-        send_message(chat_id, get_start_message(), reply_markup=build_package_keyboard())
+        send_message(chat_id, get_msg(chat_id, 'lang_select'), reply_markup=build_language_keyboard())
         return True
 
     if text == '/myaccess':
@@ -1764,11 +2424,12 @@ def handle_message(update):
             status = normalize_voucher_status(voucher)
             package_label = voucher.get('packageLabel') or ''
             if status == 'redeemed':
-                send_message(chat_id, 'Your voucher was already redeemed on %s.' % voucher.get('redeemedAt'))
+                send_message(chat_id, get_msg(chat_id, 'myaccess_redeemed', voucher.get('redeemedAt')))
             else:
-                send_message(chat_id, 'Your voucher for %s:\nPhrase: %s' % (package_label, voucher.get('phrase')))
+                txt, kb = build_approved_message(package_label, voucher.get('phrase'), user_id=chat_id, phone_number=voucher.get('phone'))
+                send_message(chat_id, txt, parse_mode='Markdown', reply_markup=kb)
         else:
-            send_message(chat_id, 'No voucher found. Buy a package first with /buy.')
+            send_message(chat_id, get_msg(chat_id, 'no_voucher'))
         return True
 
     if text == '/diag':
@@ -1819,9 +2480,7 @@ def handle_message(update):
         _save_draft(chat_id, draft)
         submit_request(chat_id, draft)
     elif draft and draft.get('step') == 'submitted':
-        send_message(chat_id, 'Your purchase was already submitted. '
-                              'The admin will review it and you will receive your voucher here '
-                              'after approval. Send /myaccess to check your status.')
+        send_message(chat_id, get_msg(chat_id, 'already_submitted'))
     return True
 
 
@@ -1836,7 +2495,7 @@ def handle_contact(update):
 
     number = contact.get('phone_number') or ''
     if not is_plausible_phone(number):
-        send_message(chat_id, 'That phone number looks invalid. Try again.')
+        send_message(chat_id, get_msg(chat_id, 'invalid_phone'), reply_markup=build_phone_share_keyboard(chat_id))
         return False
 
     draft = _get_draft(chat_id) or _new_draft(chat_id)
@@ -1849,8 +2508,7 @@ def handle_contact(update):
         'updatedAt': utcnow(),
     })
     _save_draft(chat_id, draft)
-    send_message(chat_id, 'Phone number received. How do you want to pay?',
-                 reply_markup=build_payment_method_keyboard())
+    send_message(chat_id, get_msg(chat_id, 'payment_method'), reply_markup=build_payment_method_keyboard())
     return True
 
 
@@ -1860,6 +2518,7 @@ def handle_callback(update):
     user = callback.get('from') or {}
     message = callback.get('message') or {}
     chat_id = (message.get('chat') or {}).get('id')
+    message_id = message.get('message_id')
     callback_id = callback.get('id')
 
     if not data or not callback_id:
@@ -1871,6 +2530,45 @@ def handle_callback(update):
 
     mutate_json(USERS_FILE, default_users(), _record)
 
+    if data.startswith('lang:'):
+        lang_code = data.split(':', 1)[1]
+        set_user_lang(user.get('id'), lang_code)
+        answer_callback_query(callback_id, 'Language updated')
+        if message_id:
+            edit_message_reply_markup(chat_id, message_id)
+        send_message(chat_id, get_start_message(user.get('id')), reply_markup=build_package_keyboard())
+        return True
+
+    if data.startswith('copy_phone:'):
+        phone_num = data.split(':', 1)[1]
+        answer_callback_query(callback_id, 'Copy Phone Number')
+        send_message(chat_id, get_msg(chat_id, 'copy_phone', phone_num), parse_mode='Markdown')
+        return True
+
+    if data.startswith('copy_code:'):
+        code_str = data.split(':', 1)[1]
+        answer_callback_query(callback_id, 'Copy Redeem Code')
+        send_message(chat_id, get_msg(chat_id, 'copy_code', code_str), parse_mode='Markdown')
+        return True
+
+    if data.startswith('confirm_ref:'):
+        ref = data.split(':', 1)[1]
+        answer_callback_query(callback_id, 'Purchase reference confirmed')
+        if message_id:
+            edit_message_reply_markup(chat_id, message_id)
+        handle_draft_step(user, 'confirm_ref:' + ref)
+        send_message(chat_id, get_msg(user.get('id'), 'share_phone_btn'), reply_markup=build_phone_share_keyboard(user.get('id')))
+        return True
+
+    if data == 'cancel_ref':
+        answer_callback_query(callback_id, 'Cancelled')
+        if message_id:
+            edit_message_reply_markup(chat_id, message_id)
+        draft = _new_draft(user.get('id'))
+        _save_draft(user.get('id'), draft)
+        send_message(chat_id, get_msg(user.get('id'), 'cancelled'))
+        return True
+
     if data.startswith('package:'):
         package_key = data.split(':', 1)[1]
         package = get_package_by_key(package_key)
@@ -1880,11 +2578,11 @@ def handle_callback(update):
         draft = _get_draft(user.get('id')) or _new_draft(user.get('id'))
         draft.update({'package': package['key'], 'step': 'phone', 'updatedAt': utcnow()})
         _save_draft(user.get('id'), draft)
-        edit_message_reply_markup(chat_id, message.get('message_id'))
+        if message_id:
+            edit_message_reply_markup(chat_id, message_id)
         send_message(chat_id,
-                     'Package: %s\nPrice: %s\nShare your phone number with the button below.'
-                     % (package['label'], format_money(package['priceCents'], package['currency'])),
-                     reply_markup=build_phone_share_keyboard())
+                     get_msg(user.get('id'), 'package_chosen', package['label'], format_money(package['priceCents'], package['currency'])),
+                     reply_markup=build_phone_share_keyboard(user.get('id')))
         return True
 
     if data.startswith('method:'):
@@ -1898,8 +2596,9 @@ def handle_callback(update):
             return True
         draft.update({'method': method['key'], 'step': 'name', 'updatedAt': utcnow()})
         _save_draft(user.get('id'), draft)
-        edit_message_reply_markup(chat_id, message.get('message_id'))
-        send_message(chat_id, 'Great. What is your full name?')
+        if message_id:
+            edit_message_reply_markup(chat_id, message_id)
+        send_message(chat_id, get_msg(user.get('id'), 'ask_name'))
         return True
 
     if data.startswith('approve:') and is_admin(user.get('id')):
@@ -1909,19 +2608,18 @@ def handle_callback(update):
             answer_callback_query(callback_id, 'Request not found')
             return True
 
+        if message_id:
+            edit_message_reply_markup(chat_id, message_id)
+            send_message(chat_id, '✅ Approved request `%s`' % request_id, parse_mode='Markdown')
+
         result = assign_voucher(request_id, user)
-        if result == 'ok':
+        if result in ('ok', 'already'):
             req = get_request_by_id(request_id)
             if req:
-                send_message(req.get('userId'), build_approved_message(req.get('packageLabel'),
-                                                                     req.get('voucher', {}).get('phrase')))
+                user_phone = (req.get('phone') or {}).get('number') or ''
+                txt, kb = build_approved_message(req.get('packageLabel'), req.get('voucher', {}).get('phrase'), user_id=req.get('userId'), phone_number=user_phone)
+                send_message(req.get('userId'), txt, parse_mode='Markdown', reply_markup=kb)
             answer_callback_query(callback_id, 'Approved and voucher sent')
-        elif result == 'already':
-            req = get_request_by_id(request_id)
-            if req and req.get('voucher'):
-                send_message(req.get('userId'), build_approved_message(req.get('packageLabel'),
-                                                                     req.get('voucher', {}).get('phrase')))
-            answer_callback_query(callback_id, 'Voucher already assigned')
         elif result == 'empty':
             send_message(req.get('userId'), build_approved_pending_voucher_message(req))
             answer_callback_query(callback_id, 'Approved, but voucher pool is empty')
@@ -1932,6 +2630,9 @@ def handle_callback(update):
     if data.startswith('reject:') and is_admin(user.get('id')):
         request_id = data.split(':', 1)[1]
         req = finalize_request(request_id, 'rejected', user)
+        if message_id:
+            edit_message_reply_markup(chat_id, message_id)
+            send_message(chat_id, '❌ Rejected request `%s`' % request_id, parse_mode='Markdown')
         if req:
             send_message(req.get('userId'), build_rejected_message(req))
         answer_callback_query(callback_id, 'Rejected')
@@ -1943,8 +2644,9 @@ def handle_callback(update):
         if result == 'ok':
             req = get_request_by_id(request_id)
             if req:
-                send_message(req.get('userId'), build_approved_message(req.get('packageLabel'),
-                                                                     req.get('voucher', {}).get('phrase')))
+                user_phone = (req.get('phone') or {}).get('number') or ''
+                txt, kb = build_approved_message(req.get('packageLabel'), req.get('voucher', {}).get('phrase'), user_id=req.get('userId'), phone_number=user_phone)
+                send_message(req.get('userId'), txt, parse_mode='Markdown', reply_markup=kb)
             answer_callback_query(callback_id, 'Voucher assigned and sent')
             send_pending_summary(user)
         elif result == 'empty':
@@ -2046,6 +2748,56 @@ def _redeem_error(message):
         'Voucher already redeemed': 'ALREADY_REDEEMED',
     }
     return mapping.get(message, 'BAD_REQUEST')
+
+
+@app.route('/api/v1/purchases/create', methods=['POST'])
+def create_purchase_api():
+    """Endpoint for Android app to initiate a purchase and get a Purchase Reference (e.g. TH-7F92K).
+    
+    Body: { "productId": "freshman_natural_science_y1_full_year", "userId": "...", "phone": "..." }
+    Success: { "success": true, "purchaseReference": "TH-7F92K", "purchase": {...} }
+    """
+    if request.mimetype not in ('application/json', 'text/json'):
+        return jsonify({'success': False, 'error': 'BAD_REQUEST'}), 400
+
+    body = request.get_json(silent=True) or {}
+    product_id = str(body.get('productId') or '').strip()
+    user_id = str(body.get('userId') or '').strip()
+    phone = str(body.get('phone') or '').strip()
+
+    if not product_id:
+        return jsonify({'success': False, 'error': 'MISSING_PRODUCT_ID'}), 400
+
+    cfg = get_product_config(product_id)
+    if not cfg:
+        return jsonify({'success': False, 'error': 'INVALID_PRODUCT_ID'}), 400
+
+    try:
+        ref = create_purchase_request(product_id, user_id=user_id, user_phone=phone)
+        purchase = get_purchase_by_reference(ref)
+        return jsonify({
+            'success': True,
+            'purchaseReference': ref,
+            'purchase': purchase
+        }), 200
+    except Exception as exc:
+        logger.exception('Failed to create purchase request')
+        return jsonify({'success': False, 'error': 'SERVER_ERROR'}), 500
+
+
+@app.route('/api/v1/purchases/<ref>', methods=['GET'])
+def get_purchase_api(ref):
+    """Retrieve purchase summary by Purchase Reference.
+    
+    Success: { "success": true, "purchase": {...} }
+    """
+    purchase = get_purchase_by_reference(ref)
+    if not purchase:
+        return jsonify({'success': False, 'error': 'NOT_FOUND'}), 404
+    return jsonify({
+        'success': True,
+        'purchase': purchase
+    }), 200
 
 
 def _authenticate(body):
