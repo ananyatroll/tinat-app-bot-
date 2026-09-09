@@ -32,9 +32,9 @@ class TestTemhiroBotArchitecture(unittest.TestCase):
         self.assertEqual(full_year_product['priceCents'], 50000)
         self.assertEqual(sorted(full_year_product['entitlements']), ['freshman_natural_science_y1_sem1', 'freshman_natural_science_y1_sem2'])
 
-        coc_product = flask_app.CANONICAL_PRODUCTS.get('coc_medical')
+        coc_product = flask_app.CANONICAL_PRODUCTS.get('coc_medicine')
         self.assertIsNotNone(coc_product)
-        self.assertEqual(coc_product['priceCents'], 40000)
+        self.assertEqual(coc_product['priceCents'], 30000)
 
     def test_purchase_reference_api(self):
         res = self.client.post('/api/v1/purchases/create', json={
