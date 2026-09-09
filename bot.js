@@ -217,8 +217,6 @@ function buildCocKeyboard() {
     ['🩺 Medicine COC Exam', 'coc_medicine'],
     ['🦷 Dental Medicine COC Exam', 'coc_dentistry'],
     ['💊 Pharmacy COC Exam', 'coc_pharmacy'],
-    ['🏥 HO (Health Officer) COC Exam', 'coc_ho'],
-    ['🔬 Medical Lab COC Exam', 'coc_medical_lab'],
     ['🏗 Engineering COC Exam', 'coc_engineering'],
     ['🏛 Architecture COC Exam', 'coc_architecture'],
     ['💻 Computer Science & Info IT/Science COC', 'coc_cs_is'],
