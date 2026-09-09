@@ -1126,13 +1126,14 @@ def build_request_message(request):
     phone_text = phone.get('number') or 'n/a'
     phone_verified = ' (verified)' if phone.get('verified') else ' (unverified)'
     full_name = ('%s %s' % (user.get('firstName') or '', user.get('lastName') or '')).strip()
+    ref_line = ('Purchase Ref: `%s`\n' % request.get('purchaseReference')) if request.get('purchaseReference') else ''
     return '\n'.join([
         '📌 *New Access Request Pending Review*',
         'Request ID: `%s`' % request.get('requestId'),
-        'Package: %s (%s)' % (request.get('packageLabel'), format_money(request.get('priceCents'), request.get('currency'))),
+        '%sProduct/Package: %s (%s)' % (ref_line, request.get('packageLabel'), format_money(request.get('priceCents'), request.get('currency'))),
         'Payment Method: %s' % (request.get('paymentMethodLabel') or request.get('paymentMethod') or 'N/A'),
-        'User: %s' % full_name,
-        'Telegram: @%s (`%s`)' % (user.get('username') or 'no_username', user.get('id')),
+        'Payer Name: %s' % (request.get('name') or full_name),
+        'Telegram User: @%s (`%s`)' % (user.get('username') or 'no_username', user.get('id')),
         'Phone: `%s`%s' % (phone_text, phone_verified),
         'Transaction ID: `%s`' % request.get('transactionId'),
         'Transaction Link: %s' % request.get('transactionLink'),
