@@ -1171,19 +1171,15 @@ def build_university_dept_keyboard(year):
 
 def build_coc_keyboard():
     departments = [
-        ('💉 Anesthesia COC Exam', 'coc_anesthesia'),
-        ('⚖️ Law COC Exam', 'coc_law'),
-        ('💊 Pharmacy COC Exam', 'coc_pharmacy'),
         ('🩺 Medicine COC Exam', 'coc_medicine'),
-        ('🦷 Dentistry COC Exam', 'coc_dentistry'),
-        ('🐕 Veterinary COC Exam', 'coc_veterinary'),
-        ('🔬 Medical Lab COC Exam', 'coc_medical_lab'),
+        ('🦷 Dental Medicine COC Exam', 'coc_dentistry'),
+        ('💊 Pharmacy COC Exam', 'coc_pharmacy'),
         ('🏥 HO (Health Officer) COC Exam', 'coc_ho'),
-        ('🌿 Environmental Health COC Exam', 'coc_environmental_health'),
-        ('🦴 Physiotherapy COC Exam', 'coc_physiotherapy'),
-        ('👶 Midwifery COC Exam', 'coc_midwifery'),
+        ('🔬 Medical Lab COC Exam', 'coc_medical_lab'),
+        ('🏗 Engineering COC Exam', 'coc_engineering'),
         ('🏛 Architecture COC Exam', 'coc_architecture'),
-        ('💻 Computer Science & Info Systems COC', 'coc_cs_is'),
+        ('💻 Computer Science & Info IT/Science COC', 'coc_cs_is'),
+        ('⚖️ Law COC Exam', 'coc_law'),
     ]
     rows = [[{'text': '%s — 300 ETB' % label, 'callback_data': 'package:%s' % key}] for label, key in departments]
     rows.append([{'text': '🔙 Back to Categories', 'callback_data': 'cat:main'}])
